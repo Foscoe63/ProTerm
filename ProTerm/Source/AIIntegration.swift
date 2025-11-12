@@ -8,7 +8,7 @@ import SwiftUI
    that behavior using a local mock implementation.
 */
 
-final class AIIntegration {
+final class AIIntegration: @unchecked Sendable {
     static let shared = AIIntegration()
 
     private init() {}

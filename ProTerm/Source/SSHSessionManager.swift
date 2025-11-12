@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 
 /// Minimal wrapper that spawns an `ssh` process and pipes its I/O into a TerminalSession.
-final class SSHSessionManager {
+final class SSHSessionManager: @unchecked Sendable {
     static let shared = SSHSessionManager()
 
     func startSSH(to host: String, user: String? = nil, shellManager: ShellManager) -> TerminalSession {
@@ -25,10 +25,10 @@ final class SSHSessionManager {
             return session
         }
         // Read output asynchronously and append to the session's published string.
-        pipeOut.fileHandleForReading.readabilityHandler = { handle in
+        pipeOut.fileHandleForReading.readabilityHandler = { [weak session] handle in
             let data = handle.availableData
             if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
-                DispatchQueue.main.async { session.output.append(str) }
+                DispatchQueue.main.async { session?.output.append(str) }
             }
         }
         // Store the process so it isn’t deallocated.

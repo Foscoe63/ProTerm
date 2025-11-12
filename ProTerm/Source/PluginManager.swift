@@ -1,8 +1,9 @@
 // PluginManager.swift
 import Foundation
+import Combine
 
 /// Very lightweight plugin system – plugins are bundled as bundles containing a Swift script.
-final class PluginManager {
+final class PluginManager: @unchecked Sendable {
     static let shared = PluginManager()
     private var plugins: [String] = [] // plugin identifiers
 

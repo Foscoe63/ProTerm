@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers   // ← needed for allowedContentTypes
 
+@MainActor
 final class ExportPrintManager {
     static let shared = ExportPrintManager()
 

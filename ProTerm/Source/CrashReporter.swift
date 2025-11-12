@@ -1,7 +1,7 @@
 // CrashReporter.swift
 import Foundation
 
-final class CrashReporter {
+final class CrashReporter: @unchecked Sendable {
     static let shared = CrashReporter()
     private init() {
         // Register a handler for uncaught exceptions.

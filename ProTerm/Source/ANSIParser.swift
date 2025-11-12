@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import Combine
 
 /// Parses ANSI escape codes and converts them to SwiftUI Text attributes
 struct ANSIParser {

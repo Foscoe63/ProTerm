@@ -4,6 +4,8 @@ import Combine
 struct TerminalPreferencesView: View {
     @EnvironmentObject var shellManager: ShellManager
     @EnvironmentObject var themeManager: ThemeManager
+    @EnvironmentObject var visualSettings: TerminalVisualSettings
+    @State private var isTestingBell = false
     
     var body: some View {
         ScrollView {
@@ -36,14 +38,106 @@ struct TerminalPreferencesView: View {
                     
                     Divider()
                     
-                    // Future terminal settings can be added here
+                    // MARK: - Cursor Settings
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Additional Settings")
+                        Text("Cursor Style")
                             .font(.headline)
                         
-                        Text("More terminal preferences will be added here in future updates.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        Picker("Cursor Style", selection: $visualSettings.cursorStyle) {
+                            ForEach(TerminalVisualSettings.CursorStyle.allCases) { style in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(style.rawValue)
+                                        .font(.body)
+                                    Text(style.description)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .tag(style)
+                            }
+                        }
+                        .pickerStyle(.radioGroup)
+                        
+                        Toggle("Cursor Blinking", isOn: $visualSettings.cursorBlinking)
+                    }
+                    
+                    Divider()
+                    
+                    // MARK: - Bell Settings
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Terminal Bell")
+                            .font(.headline)
+                        
+                        Picker("Bell Action", selection: $visualSettings.bellAction) {
+                            ForEach(TerminalVisualSettings.BellAction.allCases) { action in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(action.rawValue)
+                                        .font(.body)
+                                    Text(action.description)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .tag(action)
+                            }
+                        }
+                        .pickerStyle(.radioGroup)
+                        
+                        if visualSettings.shouldPlayBellSound() {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Bell Volume: \(Int(visualSettings.bellSoundVolume * 100))%")
+                                    .font(.caption)
+                                Slider(value: $visualSettings.bellSoundVolume, in: 0.0...1.0)
+                            }
+                        }
+                        
+                        if visualSettings.shouldFlashVisual() {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Flash Duration: \(String(format: "%.2f", visualSettings.bellVisualFlashDuration))s")
+                                    .font(.caption)
+                                Slider(value: $visualSettings.bellVisualFlashDuration, in: 0.05...0.5)
+                            }
+                        }
+                        
+                        Button {
+                            isTestingBell = true
+                            BellFeedbackManager.shared.previewBell(using: visualSettings)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                                isTestingBell = false
+                            }
+                        } label: {
+                            Label("Test Bell", systemImage: "speaker.wave.2.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isTestingBell)
+                    }
+                    
+                    Divider()
+                    
+                    // MARK: - Scrollback Settings
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Scrollback")
+                            .font(.headline)
+                        
+                        Toggle("Enable Scrollback", isOn: $visualSettings.scrollbackEnabled)
+                        
+                        if visualSettings.scrollbackEnabled {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Scrollback Limit: \(visualSettings.scrollbackLimit) lines")
+                                    .font(.caption)
+                                HStack {
+                                    Slider(value: Binding(
+                                        get: { Double(visualSettings.scrollbackLimit) },
+                                        set: { visualSettings.scrollbackLimit = Int($0) }
+                                    ), in: 1000...100000, step: 1000)
+                                    TextField("", value: Binding(
+                                        get: { visualSettings.scrollbackLimit },
+                                        set: { visualSettings.scrollbackLimit = max(1000, min(100000, $0)) }
+                                    ), format: .number)
+                                        .frame(width: 80)
+                                }
+                            }
+                        }
+                        
+                        Toggle("Auto-scroll to bottom", isOn: $visualSettings.autoScroll)
                     }
                 }
                 .padding()

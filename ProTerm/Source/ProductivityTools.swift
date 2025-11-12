@@ -46,7 +46,7 @@ class ProductivityTools: NSObject, ObservableObject {
     @Published var quickCommands: [QuickCommand] = []
     private let quickCommandsKey = "ProTermQuickCommands"
     
-    struct QuickCommand: Identifiable, Codable {
+    struct QuickCommand: Identifiable, Codable, Equatable {
         let id: UUID
         var name: String
         var command: String
@@ -56,6 +56,8 @@ class ProductivityTools: NSObject, ObservableObject {
         var created: Date
         var lastUsed: Date?
         var usageCount: Int
+        var requiresKeyword: Bool
+        var keywordPlaceholder: String? // e.g., "directory name" for cd command
         
         enum QuickCommandCategory: String, CaseIterable, Codable {
             case fileSystem = "File System"
@@ -194,7 +196,7 @@ class ProductivityTools: NSObject, ObservableObject {
     
     // MARK: - Quick Commands Management
     
-    func addQuickCommand(name: String, command: String, description: String? = nil, category: QuickCommand.QuickCommandCategory = .custom, icon: String = "command") {
+    func addQuickCommand(name: String, command: String, description: String? = nil, category: QuickCommand.QuickCommandCategory = .custom, icon: String = "terminal", requiresKeyword: Bool = false, keywordPlaceholder: String? = nil) {
         let quickCommand = QuickCommand(
             id: UUID(),
             name: name,
@@ -203,7 +205,9 @@ class ProductivityTools: NSObject, ObservableObject {
             category: category,
             icon: icon,
             created: Date(),
-            usageCount: 0
+            usageCount: 0,
+            requiresKeyword: requiresKeyword,
+            keywordPlaceholder: keywordPlaceholder
         )
         quickCommands.append(quickCommand)
         saveQuickCommands()
@@ -229,11 +233,78 @@ class ProductivityTools: NSObject, ObservableObject {
         }
     }
     
-    private func loadQuickCommands() {
-        if let data = UserDefaults.standard.data(forKey: quickCommandsKey),
-           let loadedCommands = try? JSONDecoder().decode([QuickCommand].self, from: data) {
-            quickCommands = loadedCommands
+    func recordQuickCommandUsage(_ commandId: UUID) {
+        if let index = quickCommands.firstIndex(where: { $0.id == commandId }) {
+            quickCommands[index].lastUsed = Date()
+            quickCommands[index].usageCount += 1
+            saveQuickCommands()
         }
+    }
+    
+    private func loadQuickCommands() {
+        if let data = UserDefaults.standard.data(forKey: quickCommandsKey) {
+            // Try to decode with new structure first
+            if let loadedCommands = try? JSONDecoder().decode([QuickCommand].self, from: data) {
+                // Migrate invalid icon names and ensure new properties exist
+                let migratedCommands = loadedCommands.map { command in
+                    var updated = command
+                    updated.icon = migrateIconName(command.icon)
+                    // Ensure requiresKeyword and keywordPlaceholder exist (for backward compatibility)
+                    // These should already be set if decoding succeeded, but we ensure defaults
+                    return updated
+                }
+                quickCommands = migratedCommands
+                // Save migrated commands if any icons were changed
+                let iconsChanged = zip(loadedCommands, migratedCommands).contains { $0.icon != $1.icon }
+                if iconsChanged {
+                    saveQuickCommands()
+                }
+            } else {
+                // Fallback: try to decode old structure and migrate
+                // This handles cases where the old structure didn't have requiresKeyword/keywordPlaceholder
+                struct OldQuickCommand: Codable {
+                    let id: UUID
+                    var name: String
+                    var command: String
+                    var description: String?
+                    var category: QuickCommand.QuickCommandCategory
+                    var icon: String
+                    var created: Date
+                    var lastUsed: Date?
+                    var usageCount: Int
+                }
+                
+                if let oldCommands = try? JSONDecoder().decode([OldQuickCommand].self, from: data) {
+                    quickCommands = oldCommands.map { old in
+                        QuickCommand(
+                            id: old.id,
+                            name: old.name,
+                            command: old.command,
+                            description: old.description,
+                            category: old.category,
+                            icon: migrateIconName(old.icon),
+                            created: old.created,
+                            lastUsed: old.lastUsed,
+                            usageCount: old.usageCount,
+                            requiresKeyword: false,
+                            keywordPlaceholder: nil
+                        )
+                    }
+                    saveQuickCommands()
+                }
+            }
+        }
+    }
+    
+    /// Migrate invalid icon names to valid SF Symbols
+    private func migrateIconName(_ iconName: String) -> String {
+        let iconMigrations: [String: String] = [
+            "git.branch": "arrow.triangle.branch",
+            "package": "shippingbox",
+            "cube": "cube.box",
+            "command": "terminal"
+        ]
+        return iconMigrations[iconName] ?? iconName
     }
     
     private func saveQuickCommands() {
@@ -467,11 +538,12 @@ class ProductivityTools: NSObject, ObservableObject {
         }
         
         if quickCommands.isEmpty {
-            addQuickCommand(name: "List All", command: "ls -la", description: "List all files with details", category: .fileSystem, icon: "list.bullet")
-            addQuickCommand(name: "Git Status", command: "git status", description: "Show git status", category: .git, icon: "git.branch")
-            addQuickCommand(name: "Docker PS", command: "docker ps", description: "List running containers", category: .docker, icon: "cube")
-            addQuickCommand(name: "NPM Install", command: "npm install", description: "Install dependencies", category: .npm, icon: "package")
-            addQuickCommand(name: "System Info", command: "uname -a", description: "Show system information", category: .system, icon: "info.circle")
+            addQuickCommand(name: "List All", command: "ls -la", description: "List all files with details", category: .fileSystem, icon: "list.bullet", requiresKeyword: false)
+            addQuickCommand(name: "Git Status", command: "git status", description: "Show git status", category: .git, icon: "arrow.triangle.branch", requiresKeyword: false)
+            addQuickCommand(name: "Docker PS", command: "docker ps", description: "List running containers", category: .docker, icon: "cube.box", requiresKeyword: false)
+            addQuickCommand(name: "NPM Install", command: "npm install", description: "Install dependencies", category: .npm, icon: "shippingbox", requiresKeyword: false)
+            addQuickCommand(name: "System Info", command: "uname -a", description: "Show system information", category: .system, icon: "info.circle", requiresKeyword: false)
+            addQuickCommand(name: "Change Directory", command: "cd", description: "Change to directory", category: .fileSystem, icon: "folder", requiresKeyword: true, keywordPlaceholder: "directory name")
         }
         
         if sessionTemplates.isEmpty {

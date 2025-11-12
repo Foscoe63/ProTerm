@@ -27,6 +27,7 @@
 		DE684CEF2EAA951F000C9E08 /* ProTerm.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ProTerm.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DE684CFC2EAA9520000C9E08 /* ProTermTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ProTermTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DE684D062EAA9520000C9E08 /* ProTermUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ProTermUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		DED6025D2EC4D3940009DBB6 /* ProTerm.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text; path = ProTerm.xctestplan; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -78,6 +79,7 @@
 		DE684CE62EAA951F000C9E08 = {
 			isa = PBXGroup;
 			children = (
+				DED6025D2EC4D3940009DBB6 /* ProTerm.xctestplan */,
 				DE684CF12EAA951F000C9E08 /* ProTerm */,
 				DE684CF02EAA951F000C9E08 /* Products */,
 			);
@@ -411,8 +413,8 @@
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "ProTerm/Source/ProTerm-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 			};
@@ -445,8 +447,8 @@
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "ProTerm/Source/ProTerm-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 			};

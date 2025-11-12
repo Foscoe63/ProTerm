@@ -7,7 +7,7 @@ struct SessionSnapshot: Codable {
     var title: String
 }
 
-final class SessionPersistence {
+final class SessionPersistence: @unchecked Sendable {
     static let shared = SessionPersistence()
     private let fileURL: URL = {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!

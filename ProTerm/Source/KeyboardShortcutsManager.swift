@@ -10,9 +10,87 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
     @Published var isEnabled: Bool = true
     @Published var lastAction: Action?
     
+    // MARK: - Event Monitor
+    nonisolated(unsafe) private var eventMonitor: Any?
+    
     // MARK: - Initialization
     override init() {
         super.init()
+        setupEventMonitor()
+    }
+    
+    deinit {
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+    
+    private func setupEventMonitor() {
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self = self, self.isEnabled else { return event }
+            
+            let modifiers = event.modifierFlags
+            var eventModifiers: EventModifiers = []
+            if modifiers.contains(.command) { eventModifiers.insert(.command) }
+            if modifiers.contains(.shift) { eventModifiers.insert(.shift) }
+            if modifiers.contains(.option) { eventModifiers.insert(.option) }
+            if modifiers.contains(.control) { eventModifiers.insert(.control) }
+            
+            // Get the key character, handling special cases
+            let keyChar: Character?
+            if let chars = event.charactersIgnoringModifiers?.lowercased(), !chars.isEmpty {
+                keyChar = chars.first
+            } else {
+                // Handle special keys
+                switch event.keyCode {
+                case 0: keyChar = "a"
+                case 1: keyChar = "s"
+                case 2: keyChar = "d"
+                case 3: keyChar = "f"
+                case 4: keyChar = "h"
+                case 5: keyChar = "g"
+                case 6: keyChar = "z"
+                case 7: keyChar = "x"
+                case 8: keyChar = "c"
+                case 9: keyChar = "v"
+                case 11: keyChar = "b"
+                case 12: keyChar = "q"
+                case 13: keyChar = "w"
+                case 14: keyChar = "e"
+                case 15: keyChar = "r"
+                case 16: keyChar = "y"
+                case 17: keyChar = "t"
+                case 31: keyChar = "o"
+                case 32: keyChar = "u"
+                case 34: keyChar = "i"
+                case 35: keyChar = "p"
+                case 37: keyChar = "l"
+                case 38: keyChar = "j"
+                case 40: keyChar = "k"
+                case 45: keyChar = "n"
+                case 46: keyChar = "m"
+                case 18: keyChar = "1"
+                case 19: keyChar = "2"
+                case 20: keyChar = "3"
+                case 21: keyChar = "4"
+                case 23: keyChar = "5"
+                case 22: keyChar = "6"
+                case 26: keyChar = "7"
+                case 28: keyChar = "8"
+                case 25: keyChar = "9"
+                default: keyChar = nil
+                }
+            }
+            
+            if let char = keyChar {
+                let keyEquivalent = KeyEquivalent(char)
+                if self.handleKeyPress(keyEquivalent, modifiers: eventModifiers) {
+                    return nil // Consume the event
+                }
+            }
+            
+            return event
+        }
     }
     
     // MARK: - Shortcut Actions
@@ -27,6 +105,8 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
         case paste
         case find
         case replace
+        case focusInput
+        case commandPalette
     }
     
     // MARK: - Shortcut Definitions
@@ -47,6 +127,9 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
         Shortcut(key: KeyEquivalent("v"), modifiers: .command, action: .paste, description: "Paste"),
         Shortcut(key: KeyEquivalent("f"), modifiers: [.command, .shift], action: .find, description: "Find"),
         Shortcut(key: KeyEquivalent("r"), modifiers: [.command, .shift], action: .replace, description: "Replace"),
+        Shortcut(key: KeyEquivalent("i"), modifiers: [.command], action: .focusInput, description: "Focus Command Input"),
+        Shortcut(key: KeyEquivalent("p"), modifiers: [.command, .shift], action: .commandPalette, description: "Command Palette"),
+        Shortcut(key: KeyEquivalent("p"), modifiers: .command, action: .commandPalette, description: "Command Palette (Cmd+P)"),
         
         // Number keys for tab switching
         Shortcut(key: KeyEquivalent("1"), modifiers: .command, action: .switchTab(0), description: "Switch to Tab 1"),
@@ -71,9 +154,23 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
     var onPaste: (() -> Void)?
     var onFind: (() -> Void)?
     var onReplace: (() -> Void)?
+    var onFocusInput: (() -> Void)?
+    var onCommandPalette: (() -> Void)?
     
     // MARK: - Handle Key Press
     func handleKeyPress(_ key: KeyEquivalent, modifiers: EventModifiers) -> Bool {
+        // Check if a text field is currently focused - if so, let native copy/paste work
+        if modifiers.contains(.command) && (key == KeyEquivalent("v") || key == KeyEquivalent("c")) {
+            if let window = NSApplication.shared.keyWindow,
+               let firstResponder = window.firstResponder {
+                // Check if first responder is a text field or text view
+                if firstResponder is NSTextView || firstResponder is NSTextField {
+                    // Let native paste/copy behavior work
+                    return false
+                }
+            }
+        }
+        
         for shortcut in Self.shortcuts {
             if shortcut.key == key && shortcut.modifiers == modifiers {
                 handleAction(shortcut.action)
@@ -105,6 +202,10 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
             onFind?()
         case .replace:
             onReplace?()
+        case .focusInput:
+            onFocusInput?()
+        case .commandPalette:
+            onCommandPalette?()
         }
     }
 }
