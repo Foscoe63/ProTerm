@@ -89,6 +89,32 @@ class TerminalVisualSettings: ObservableObject {
         didSet { save() }
     }
     
+    // MARK: - IO Behaviour
+    @Published var enableBracketedPaste: Bool = true {
+        didSet { save() }
+    }
+    
+    @Published var enableMouseReporting: Bool = false {
+        didSet { save() }
+    }
+    
+    // MARK: - Command Box Outline Settings
+    @Published var showCommandBoxOutline: Bool = false {
+        didSet { save() }
+    }
+    
+    @Published var commandBoxOutlineColor: Color = .blue {
+        didSet { save() }
+    }
+    
+    @Published var commandBoxOutlineWidth: CGFloat = 1.0 {
+        didSet { save() }
+    }
+    
+    @Published var commandBoxOutlineCornerRadius: CGFloat = 4.0 {
+        didSet { save() }
+    }
+    
     // MARK: - UserDefaults Keys
     private let cursorStyleKey = "ProTermCursorStyle"
     private let cursorBlinkingKey = "ProTermCursorBlinking"
@@ -97,6 +123,12 @@ class TerminalVisualSettings: ObservableObject {
     private let scrollbackLimitKey = "ProTermScrollbackLimit"
     private let scrollbackEnabledKey = "ProTermScrollbackEnabled"
     private let autoScrollKey = "ProTermAutoScroll"
+    private let bracketedPasteKey = "ProTermBracketedPaste"
+    private let mouseReportingKey = "ProTermMouseReporting"
+    private let showCommandBoxOutlineKey = "ProTermShowCommandBoxOutline"
+    private let commandBoxOutlineColorKey = "ProTermCommandBoxOutlineColor"
+    private let commandBoxOutlineWidthKey = "ProTermCommandBoxOutlineWidth"
+    private let commandBoxOutlineCornerRadiusKey = "ProTermCommandBoxOutlineCornerRadius"
     
     init() {
         load()
@@ -123,6 +155,38 @@ class TerminalVisualSettings: ObservableObject {
         if scrollbackLimit == 0 { scrollbackLimit = 10000 } // Default
         scrollbackEnabled = UserDefaults.standard.object(forKey: scrollbackEnabledKey) as? Bool ?? true
         autoScroll = UserDefaults.standard.object(forKey: autoScrollKey) as? Bool ?? true
+        
+        // Load IO settings
+        if let storedBracketed = UserDefaults.standard.object(forKey: bracketedPasteKey) as? Bool {
+            enableBracketedPaste = storedBracketed
+        }
+        if let storedMouse = UserDefaults.standard.object(forKey: mouseReportingKey) as? Bool {
+            enableMouseReporting = storedMouse
+        }
+        
+        // Load command box outline settings
+        showCommandBoxOutline = UserDefaults.standard.object(forKey: showCommandBoxOutlineKey) as? Bool ?? false
+        
+        // Load color components
+        let red = UserDefaults.standard.double(forKey: "\(commandBoxOutlineColorKey).red")
+        let green = UserDefaults.standard.double(forKey: "\(commandBoxOutlineColorKey).green")
+        let blue = UserDefaults.standard.double(forKey: "\(commandBoxOutlineColorKey).blue")
+        let alpha = UserDefaults.standard.double(forKey: "\(commandBoxOutlineColorKey).alpha")
+        
+        if red != 0.0 || green != 0.0 || blue != 0.0 || alpha != 0.0 {
+            commandBoxOutlineColor = Color(red: red, green: green, blue: blue, opacity: alpha)
+        }
+        
+        // Load outline width and corner radius
+        let width = UserDefaults.standard.double(forKey: commandBoxOutlineWidthKey)
+        if width > 0.0 {
+            commandBoxOutlineWidth = width
+        }
+        
+        let radius = UserDefaults.standard.double(forKey: commandBoxOutlineCornerRadiusKey)
+        if radius > 0.0 {
+            commandBoxOutlineCornerRadius = radius
+        }
     }
     
     private func save() {
@@ -133,6 +197,21 @@ class TerminalVisualSettings: ObservableObject {
         UserDefaults.standard.set(scrollbackLimit, forKey: scrollbackLimitKey)
         UserDefaults.standard.set(scrollbackEnabled, forKey: scrollbackEnabledKey)
         UserDefaults.standard.set(autoScroll, forKey: autoScrollKey)
+        UserDefaults.standard.set(enableBracketedPaste, forKey: bracketedPasteKey)
+        UserDefaults.standard.set(enableMouseReporting, forKey: mouseReportingKey)
+        UserDefaults.standard.set(showCommandBoxOutline, forKey: showCommandBoxOutlineKey)
+        
+        // Save color components
+        let nsColor = NSColor(commandBoxOutlineColor)
+        let rgb = nsColor.usingColorSpace(.sRGB) ?? nsColor.usingColorSpace(.deviceRGB) ?? NSColor(red: 0, green: 0, blue: 1, alpha: 1)
+        UserDefaults.standard.set(rgb.redComponent, forKey: "\(commandBoxOutlineColorKey).red")
+        UserDefaults.standard.set(rgb.greenComponent, forKey: "\(commandBoxOutlineColorKey).green")
+        UserDefaults.standard.set(rgb.blueComponent, forKey: "\(commandBoxOutlineColorKey).blue")
+        UserDefaults.standard.set(rgb.alphaComponent, forKey: "\(commandBoxOutlineColorKey).alpha")
+        UserDefaults.standard.set(commandBoxOutlineWidth, forKey: commandBoxOutlineWidthKey)
+        UserDefaults.standard.set(commandBoxOutlineCornerRadius, forKey: commandBoxOutlineCornerRadiusKey)
+        
+        NotificationCenter.default.post(name: .proTermIOSettingsDidChange, object: nil)
     }
     
     // MARK: - Helper Methods
@@ -148,5 +227,9 @@ class TerminalVisualSettings: ObservableObject {
     func shouldShowNotification() -> Bool {
         return bellAction == .notification || bellAction == .all
     }
+}
+
+extension Notification.Name {
+    static let proTermIOSettingsDidChange = Notification.Name("ProTermIOSettingsDidChange")
 }
 

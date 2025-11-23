@@ -3,7 +3,7 @@ import Combine           // needed for @Published’s synthesized initializer
 import AppKit            // NSColor – used to extract RGBA components from a SwiftUI Color
 
 /* ---------- Helper that makes `Color` codable ---------- */
-private struct CodableColor: Codable {
+private struct CodableColor: Codable, Equatable {
     let red: Double
     let green: Double
     let blue: Double
@@ -25,7 +25,7 @@ private struct CodableColor: Codable {
 }
 
 /* ---------- Theme model (now truly Codable) ---------- */
-struct Theme: Codable {
+struct Theme: Codable, Equatable {
     var background: Color = .black
     var foreground: Color = .green
     var cursor:     Color = .white
@@ -61,94 +61,352 @@ struct Theme: Codable {
     }
 }
 
-/* ---------- macOS Terminal-like Profiles ---------- */
-enum TerminalProfile: String, CaseIterable, Identifiable {
-    case basic = "Basic"
-    case pro = "Pro"
-    case ocean = "Ocean"
-    case redSands = "Red Sands"
-    case grass = "Grass"
-    case manPage = "Man Page"
-    case novel = "Novel"
-
-    var id: String { rawValue }
-
-    var theme: Theme {
-        switch self {
-        case .basic:
-            // White background, black text
-            return Theme(background: .white, foreground: .black, cursor: .black)
-        case .pro:
-            // Black background, green text
-            return Theme(background: .black, foreground: Color(red: 0.0, green: 0.9, blue: 0.0), cursor: .white)
-        case .ocean:
-            // Dark blue-ish background with light foreground
-            return Theme(background: Color(red: 0.0, green: 0.17, blue: 0.21),
-                         foreground: Color(red: 0.72, green: 0.82, blue: 0.82),
-                         cursor: .white)
-        case .redSands:
-            return Theme(background: Color(red: 0.24, green: 0.06, blue: 0.0),
-                         foreground: Color(red: 1.0, green: 0.76, blue: 0.66),
-                         cursor: .white)
-        case .grass:
-            return Theme(background: Color(red: 0.02, green: 0.15, blue: 0.02),
-                         foreground: Color(red: 0.75, green: 1.0, blue: 0.75),
-                         cursor: .white)
-        case .manPage:
-            return Theme(background: Color(red: 0.98, green: 0.98, blue: 0.94),
-                         foreground: Color(red: 0.20, green: 0.20, blue: 0.20),
-                         cursor: .black)
-        case .novel:
-            return Theme(background: Color(red: 1.0, green: 0.99, blue: 0.95),
-                         foreground: Color(red: 0.15, green: 0.15, blue: 0.15),
-                         cursor: .black)
-        }
-    }
-}
-
 /* ---------- Manager that the UI observes ---------- */
+@MainActor
 final class ThemeManager: ObservableObject {
     // Stored, published property – changes now correctly propagate.
     @Published var current: Theme = Theme() {
-        didSet { saveTheme() }
+        didSet { saveThemeSnapshot() }
     }
-
-    @Published var selectedProfile: TerminalProfile = .pro {
-        didSet { applyProfile(selectedProfile) }
-    }
-
-    private let defaultsKeyTheme = "ProTermSelectedTheme"
-    private let defaultsKeyProfile = "ProTermSelectedProfile"
-
-    init() {
-        // Load profile first
-        if let savedProfile = UserDefaults.standard.string(forKey: defaultsKeyProfile),
-           let profile = TerminalProfile(rawValue: savedProfile) {
-            selectedProfile = profile
-            current = profile.theme
-        } else if let data = UserDefaults.standard.data(forKey: defaultsKeyTheme),
-                  let decoded = try? JSONDecoder().decode(Theme.self, from: data) {
-            // Fallback to previously saved custom theme
-            current = decoded
-        } else {
-            // Default to Pro profile
-            selectedProfile = .pro
-            current = TerminalProfile.pro.theme
+    
+    @Published private(set) var profiles: [AppearanceProfile]
+    @Published private(set) var activeProfileID: UUID
+    @Published var syncProfilesToICloud: Bool = false {
+        didSet {
+            UserDefaults.standard.set(syncProfilesToICloud, forKey: defaultsKeyProfileSync)
+            if syncProfilesToICloud {
+                startICloudObserver()
+                pushProfilesToICloud()
+            } else {
+                stopICloudObserver()
+            }
         }
     }
-
-    private func applyProfile(_ profile: TerminalProfile) {
-        current = profile.theme
-        saveProfile(profile)
+    
+    private weak var fontManager: FontManager?
+    
+    private let defaultsKeyTheme = "ProTermSelectedTheme"
+    private let defaultsKeyProfileID = "ProTermSelectedProfileID"
+    private let defaultsKeyProfiles = "ProTermAppearanceProfiles"
+    private let defaultsKeyProfileSync = "ProTermProfileSyncEnabled"
+    private let ubiquitousProfilesKey = "ProTermProfilesArchive"
+    
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+    private let iCloudStore = NSUbiquitousKeyValueStore.default
+    private var iCloudObserver: NSObjectProtocol?
+    
+    init() {
+        let storedProfiles: [AppearanceProfile]
+        let diskURL: URL = {
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? FileManager.default.homeDirectoryForCurrentUser
+            let directory = support.appendingPathComponent("ProTerm", isDirectory: true)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            return directory.appendingPathComponent("Profiles.json", isDirectory: false)
+        }()
+        if let diskData = try? Data(contentsOf: diskURL),
+           let decoded = try? decoder.decode([AppearanceProfile].self, from: diskData),
+           !decoded.isEmpty {
+            storedProfiles = decoded
+        } else if let data = UserDefaults.standard.data(forKey: defaultsKeyProfiles),
+                  let decoded = try? decoder.decode([AppearanceProfile].self, from: data),
+                  !decoded.isEmpty {
+            storedProfiles = decoded
+        } else {
+            storedProfiles = AppearanceProfile.builtIn
+        }
+        let deduped = Self.deduplicatedProfiles(from: storedProfiles)
+        profiles = deduped
+        
+        if let idString = UserDefaults.standard.string(forKey: defaultsKeyProfileID),
+           let savedID = UUID(uuidString: idString),
+           deduped.contains(where: { $0.id == savedID }) {
+            activeProfileID = savedID
+        } else {
+            activeProfileID = deduped.first?.id ?? AppearanceProfile.builtIn.first!.id
+        }
+        
+        if let activeTheme = deduped.first(where: { $0.id == activeProfileID })?.theme {
+            current = activeTheme
+        } else if let data = UserDefaults.standard.data(forKey: defaultsKeyTheme),
+                  let decoded = try? decoder.decode(Theme.self, from: data) {
+            current = decoded
+        } else {
+            current = deduped.first?.theme ?? Theme()
+        }
+        
+        writeProfilesToDisk(at: diskURL)
+        
+        syncProfilesToICloud = UserDefaults.standard.object(forKey: defaultsKeyProfileSync) as? Bool ?? false
+        if syncProfilesToICloud {
+            startICloudObserver()
+            pullProfilesFromICloudIfAvailable()
+        }
     }
-
-    private func saveTheme() {
-        if let data = try? JSONEncoder().encode(current) {
+    
+    deinit {
+        Task { @MainActor [weak self] in
+            self?.stopICloudObserver()
+        }
+    }
+    
+    var activeProfile: AppearanceProfile {
+        profiles.first(where: { $0.id == activeProfileID }) ?? profiles.first ?? AppearanceProfile.builtIn.first!
+    }
+    
+    func attachFontManager(_ manager: FontManager) {
+        fontManager = manager
+        syncFontManagerWithActiveProfile()
+    }
+    
+    func selectProfile(_ profile: AppearanceProfile) {
+        guard profile.id != activeProfileID else { return }
+        activeProfileID = profile.id
+        current = profile.theme
+        persistSelection()
+        syncFontManagerWithActiveProfile()
+    }
+    
+    func duplicateProfile(_ profile: AppearanceProfile? = nil) {
+        let source = profile ?? activeProfile
+        var copy = source
+        copy.id = UUID()
+        copy.kind = .custom
+        copy.name = uniqueName(basedOn: source.name)
+        copy.backgroundMaterial = source.backgroundMaterial
+        profiles.append(copy)
+        selectProfile(copy)
+        persistProfiles()
+    }
+    
+    func deleteProfile(_ profile: AppearanceProfile) {
+        guard profile.isCustom else { return }
+        guard profiles.count > 1 else { return }
+        profiles.removeAll { $0.id == profile.id }
+        if activeProfileID == profile.id {
+            activeProfileID = profiles.first?.id ?? AppearanceProfile.builtIn.first!.id
+            current = activeProfile.theme
+            syncFontManagerWithActiveProfile()
+        }
+        persistProfiles()
+        persistSelection()
+    }
+    
+    func renameActiveProfile(to newName: String) {
+        guard !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        updateActiveProfile { profile in
+            profile.name = newName
+        }
+    }
+    
+    func renameActiveProfileAsync(to newName: String) {
+        Task { @MainActor [weak self] in
+            self?.renameActiveProfile(to: newName)
+        }
+    }
+    
+    func updateActiveProfile(_ transform: (inout AppearanceProfile) -> Void) {
+        if let index = profiles.firstIndex(where: { $0.id == activeProfileID }) {
+            var profile = profiles[index]
+            if profile.kind == .builtIn {
+                var customCopy = profile
+                customCopy.id = UUID()
+                customCopy.kind = .custom
+                customCopy.name = uniqueName(basedOn: "\(profile.name) Custom")
+                transform(&customCopy)
+                profiles.append(customCopy)
+                activeProfileID = customCopy.id
+                current = customCopy.theme
+            } else {
+                transform(&profile)
+                profiles[index] = profile
+                current = profile.theme
+            }
+        } else {
+            var profile = activeProfile
+            transform(&profile)
+            if let idx = profiles.firstIndex(where: { $0.id == profile.id }) {
+                profiles[idx] = profile
+            } else {
+                profiles.append(profile)
+            }
+            current = profile.theme
+        }
+        persistProfiles()
+        persistSelection()
+        syncFontManagerWithActiveProfile()
+    }
+    
+    func createCustomProfile() {
+        let profile = AppearanceProfile(
+            name: uniqueName(basedOn: "Custom Profile"),
+            theme: Theme(background: .black, foreground: Color(red: 0.0, green: 0.9, blue: 0.0), cursor: .white),
+            fontName: "SF Mono",
+            fontSize: 13,
+            backgroundMaterial: .solid,
+            backgroundOpacity: 1.0,
+            cornerRadius: 16,
+            horizontalPadding: 20,
+            verticalPadding: 16,
+            kind: .custom
+        )
+        profiles.append(profile)
+        selectProfile(profile)
+        persistProfiles()
+    }
+    
+    func resetProfilesToDefaults() {
+        profiles = AppearanceProfile.builtIn
+        activeProfileID = profiles.first?.id ?? UUID()
+        current = profiles.first?.theme ?? Theme()
+        persistProfiles()
+        syncFontManagerWithActiveProfile()
+    }
+    
+    func exportProfiles(to url: URL) throws {
+        let data = try encoder.encode(profiles)
+        try data.write(to: url, options: .atomic)
+    }
+    
+    func importProfiles(from url: URL) throws {
+        let data = try Data(contentsOf: url)
+        let decoded = try decoder.decode([AppearanceProfile].self, from: data)
+        guard !decoded.isEmpty else { return }
+        profiles = Self.deduplicatedProfiles(from: decoded)
+        activeProfileID = profiles.first?.id ?? UUID()
+        current = profiles.first?.theme ?? Theme()
+        persistProfiles()
+        syncFontManagerWithActiveProfile()
+    }
+    
+    func updateActiveProfileFont(name: String? = nil, size: Double? = nil) {
+        updateActiveProfile { profile in
+            if let name = name { profile.fontName = name }
+            if let size = size { profile.fontSize = size }
+        }
+    }
+    
+    func updateActiveProfileAsync(_ transform: @escaping (inout AppearanceProfile) -> Void) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.updateActiveProfile(transform)
+        }
+    }
+    
+    func updateActiveProfileFontAsync(name: String? = nil, size: Double? = nil) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.updateActiveProfileFont(name: name, size: size)
+        }
+    }
+    
+    // MARK: - Persistence
+    
+    private func persistProfiles() {
+        if let data = try? encoder.encode(profiles) {
+            UserDefaults.standard.set(data, forKey: defaultsKeyProfiles)
+        }
+        writeProfilesToDisk()
+        pushProfilesToICloud()
+    }
+    
+    private func persistSelection() {
+        UserDefaults.standard.set(activeProfileID.uuidString, forKey: defaultsKeyProfileID)
+    }
+    
+    private func saveThemeSnapshot() {
+        if let data = try? encoder.encode(current) {
             UserDefaults.standard.set(data, forKey: defaultsKeyTheme)
         }
     }
+    
+    private func syncFontManagerWithActiveProfile() {
+        let profile = activeProfile
+        if fontManager?.fontName != profile.fontName {
+            fontManager?.fontName = profile.fontName
+        }
+        if fontManager?.fontSize != profile.fontSize {
+            fontManager?.fontSize = profile.fontSize
+        }
+    }
+    
+    private func uniqueName(basedOn base: String) -> String {
+        var candidate = base
+        var suffix = 2
+        while profiles.contains(where: { $0.name == candidate }) {
+            candidate = "\(base) \(suffix)"
+            suffix += 1
+        }
+        return candidate
+    }
+    
+    private var profilesArchiveURL: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? FileManager.default.homeDirectoryForCurrentUser
+        let directory = support.appendingPathComponent("ProTerm", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("Profiles.json", isDirectory: false)
+    }
+    
+    private func writeProfilesToDisk(at url: URL? = nil) {
+        let target = url ?? profilesArchiveURL
+        if let data = try? encoder.encode(profiles) {
+            try? data.write(to: target, options: .atomic)
+        }
+    }
+    
+    private func startICloudObserver() {
+        guard iCloudObserver == nil else { return }
+        iCloudObserver = NotificationCenter.default.addObserver(
+            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+            object: iCloudStore,
+            queue: .main
+        ) { [weak self] notification in
+            let reason = notification.userInfo?[NSUbiquitousKeyValueStoreChangeReasonKey] as? Int
+            Task { @MainActor [weak self] in
+                guard let self, self.syncProfilesToICloud else { return }
+                guard let reason, reason == NSUbiquitousKeyValueStoreServerChange else { return }
+                self.pullProfilesFromICloudIfAvailable()
+            }
+        }
+        iCloudStore.synchronize()
+    }
+    
+    private func stopICloudObserver() {
+        if let token = iCloudObserver {
+            NotificationCenter.default.removeObserver(token)
+            iCloudObserver = nil
+        }
+    }
+    
+    private func pushProfilesToICloud() {
+        guard syncProfilesToICloud, let data = try? encoder.encode(profiles) else { return }
+        iCloudStore.set(data, forKey: ubiquitousProfilesKey)
+        iCloudStore.synchronize()
+    }
+    
+    private func pullProfilesFromICloudIfAvailable() {
+        guard let data = iCloudStore.data(forKey: ubiquitousProfilesKey),
+              let decoded = try? decoder.decode([AppearanceProfile].self, from: data),
+              !decoded.isEmpty else { return }
+        profiles = Self.deduplicatedProfiles(from: decoded)
+        if !profiles.contains(where: { $0.id == activeProfileID }) {
+            activeProfileID = profiles.first?.id ?? UUID()
+        }
+        current = profiles.first(where: { $0.id == activeProfileID })?.theme ?? profiles.first?.theme ?? current
+        persistSelection()
+        writeProfilesToDisk()
+        syncFontManagerWithActiveProfile()
+    }
 
-    private func saveProfile(_ profile: TerminalProfile) {
-        UserDefaults.standard.set(profile.rawValue, forKey: defaultsKeyProfile)
+    private static func deduplicatedProfiles(from profiles: [AppearanceProfile]) -> [AppearanceProfile] {
+        var seen = Set<String>()
+        return profiles.filter { profile in
+            let key = profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if seen.contains(key) {
+                return false
+            }
+            seen.insert(key)
+            return true
+        }
     }
 }

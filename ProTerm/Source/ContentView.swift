@@ -22,6 +22,8 @@ struct ContentView: View {
     // Command palette visibility
     @State private var showCommandPalette = false
 
+    private var focusController: CommandInputFocusController { CommandInputFocusController.shared }
+
     var body: some View {
         ZStack {
             HStack(spacing: 0) {
@@ -44,6 +46,9 @@ struct ContentView: View {
                                 if terminalManager.sessions.indices.contains(selectedTab) {
                                     let targetId = terminalManager.sessions[selectedTab].id
                                     NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: targetId)
+                                    Task { @MainActor in
+                                        focusCurrentSession(reason: .startup)
+                                    }
                                 }
                             }
                         }
@@ -55,6 +60,9 @@ struct ContentView: View {
                                 if terminalManager.sessions.indices.contains(selectedTab) {
                                     let targetId = terminalManager.sessions[selectedTab].id
                                     NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: targetId)
+                                    Task { @MainActor in
+                                        focusCurrentSession(reason: .startup)
+                                    }
                                 }
                             }
                         }
@@ -67,6 +75,9 @@ struct ContentView: View {
                                 let targetId = terminalManager.sessions[selectedTab].id
                                 // Post focus notification for the current session
                                 NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: targetId)
+                                Task { @MainActor in
+                                    focusCurrentSession(reason: .windowBecameKey)
+                                }
                             }
                         }
                     }
@@ -76,34 +87,34 @@ struct ContentView: View {
                     HStack(spacing: 6) {
                         ForEach(Array(terminalManager.sessions.enumerated()), id: \.element.id) { index, session in
                             let meta = terminalManager.getTabMetadata(for: session.id)
-                            Button(action: { selectedTab = index }) {
-                                HStack(spacing: 8) {
-                                    // Colored indicator
-                                    Circle()
-                                        .fill(meta.color.color)
-                                        .frame(width: 6, height: 6)
-                                    Text(meta.name.isEmpty ? "Session \(index + 1)" : meta.name)
-                                        .font(.system(size: 12, weight: selectedTab == index ? .semibold : .regular))
-                                        .foregroundColor(selectedTab == index ? .primary : .secondary)
+                            TabButton(
+                                session: session,
+                                index: index,
+                                meta: meta,
+                                isSelected: selectedTab == index,
+                                terminalManager: terminalManager,
+                                onSelect: { selectedTab = index },
+                                onMove: { from, to in
+                                    terminalManager.moveSession(from: from, to: to)
+                                    // Update selectedTab to track the moved session
+                                    if selectedTab == from {
+                                        selectedTab = to
+                                    } else if selectedTab > from && selectedTab <= to {
+                                        selectedTab -= 1
+                                    } else if selectedTab < from && selectedTab >= to {
+                                        selectedTab += 1
+                                    }
                                 }
-                                .padding(.vertical, 6)
-                                .padding(.horizontal, 10)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(selectedTab == index ? Color(NSColor.windowBackgroundColor).opacity(0.6) : Color.clear)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(selectedTab == index ? Color.accentColor.opacity(0.6) : Color.secondary.opacity(0.2), lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
+                            )
                         }
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                 }
                 .background(themeManager.current.background.opacity(0.05))
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Terminal tabs")
+                .accessibilityHint("Use arrow keys to navigate between tabs. Press Space to select a tab.")
 
                 // MARK: – Optional global search bar
                 if !searchQuery.isEmpty {
@@ -116,14 +127,23 @@ struct ContentView: View {
                     TerminalView(session: currentSession)
                         .id(currentSession.id) // Force SwiftUI to create a new view for each session
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Terminal session")
+                        .accessibilityHint("Terminal output and command input. Use Tab to navigate between elements.")
                         .onChange(of: selectedTab) { _, newIndex in
                             // Restore focus when switching sessions — target the new session explicitly
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                 if terminalManager.sessions.indices.contains(newIndex) {
                                     let targetId = terminalManager.sessions[newIndex].id
                                     NotificationCenter.default.post(name: .focusCommandInput, object: targetId)
+                                    Task { @MainActor in
+                                        focusCurrentSession(reason: .manual)
+                                    }
                                 } else {
                                     NotificationCenter.default.post(name: .focusCommandInput, object: nil)
+                                    Task { @MainActor in
+                                        focusCurrentSession(reason: .manual)
+                                    }
                                 }
                             }
                         }
@@ -151,37 +171,71 @@ struct ContentView: View {
             
             // CRITICAL: Activate app and ensure window is key on startup
             // This is essential for focus to work when running outside Xcode
+            // Do this immediately and aggressively
+            NSApp.activate(ignoringOtherApps: true)
+            
             DispatchQueue.main.async {
                 NSApp.activate(ignoringOtherApps: true)
                 let window = NSApplication.shared.mainWindow
                     ?? NSApplication.shared.keyWindow
                     ?? NSApp.windows.first
-                window?.makeKeyAndOrderFront(nil)
-                // Force window to be key - sometimes makeKeyAndOrderFront isn't enough
-                if let window = window, !window.isKeyWindow {
-                    window.makeKey()
+                
+                if let window = window {
+                    // CRITICAL: Make window key immediately - this is the key to focus working
+                    window.makeKeyAndOrderFront(nil)
+                    // Force window to be key - sometimes makeKeyAndOrderFront isn't enough
+                    if !window.isKeyWindow {
+                        window.makeKey()
+                        // Sometimes we need to order front again after makeKey
+                        window.makeKeyAndOrderFront(nil)
+                    }
                 }
+                
                 // Broadcast a generic focus request so whichever TerminalView is active can claim focus
                 NotificationCenter.default.post(name: .focusCommandInput, object: nil)
+                Task { @MainActor in
+                    focusCurrentSession(reason: .startup)
+                }
             }
             
             // Also try after a short delay to ensure window is fully ready
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 NSApp.activate(ignoringOtherApps: true)
                 let window = NSApplication.shared.mainWindow
                     ?? NSApplication.shared.keyWindow
                     ?? NSApp.windows.first
-                window?.makeKeyAndOrderFront(nil)
-                if let window = window, !window.isKeyWindow {
-                    window.makeKey()
+                
+                if let window = window {
+                    window.makeKeyAndOrderFront(nil)
+                    if !window.isKeyWindow {
+                        window.makeKey()
+                        window.makeKeyAndOrderFront(nil)
+                    }
                 }
+                
                 // Post another broadcast in case TerminalView mounted after the first one
                 NotificationCenter.default.post(name: .focusCommandInput, object: nil)
+                Task { @MainActor in
+                    focusCurrentSession(reason: .startup)
+                }
             }
-
-            // Final safety: one more very short delayed broadcast to cover late layout
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            
+            // Also try after a longer delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                NSApp.activate(ignoringOtherApps: true)
+                let window = NSApplication.shared.mainWindow
+                    ?? NSApplication.shared.keyWindow
+                    ?? NSApp.windows.first
+                
+                if let window = window, !window.isKeyWindow {
+                    window.makeKey()
+                    window.makeKeyAndOrderFront(nil)
+                }
+                
                 NotificationCenter.default.post(name: .focusCommandInput, object: nil)
+                Task { @MainActor in
+                    focusCurrentSession(reason: .startup)
+                }
             }
         }
         // Listen for when the window becomes key to set initial focus
@@ -191,6 +245,9 @@ struct ContentView: View {
                 if terminalManager.sessions.indices.contains(selectedTab) {
                     let targetId = terminalManager.sessions[selectedTab].id
                     NotificationCenter.default.post(name: .focusCommandInput, object: targetId)
+                    Task { @MainActor in
+                        focusCurrentSession(reason: .windowBecameKey)
+                    }
                 }
             }
         }
@@ -213,6 +270,17 @@ struct ContentView: View {
             }
             return true
         }
+    }
+    
+    @MainActor
+    private func focusCurrentSession(reason: CommandInputFocusController.FocusReason) {
+        guard terminalManager.sessions.indices.contains(selectedTab) else {
+            focusController.clearActiveSession()
+            return
+        }
+        let sessionID = terminalManager.sessions[selectedTab].id
+        focusController.setActiveSession(sessionID)
+        focusController.requestFocus(for: sessionID, reason: reason)
     }
     
     // MARK: - Keyboard Shortcuts Setup
@@ -284,6 +352,9 @@ struct ContentView: View {
         keyboardShortcutsManager.onFocusInput = {
             // Focus command input in current terminal
             NotificationCenter.default.post(name: .focusCommandInput, object: nil)
+            Task { @MainActor in
+                focusCurrentSession(reason: .manual)
+            }
         }
         
         keyboardShortcutsManager.onCommandPalette = {
@@ -765,6 +836,85 @@ struct TabContextMenu: View {
 }
 
 // MARK: - Session Terminal View Wrapper
+
+// MARK: - Tab Button with Drag Support
+struct TabButton: View {
+    let session: TerminalSession
+    let index: Int
+    let meta: TabMetadata
+    let isSelected: Bool
+    let terminalManager: TerminalManager
+    let onSelect: () -> Void
+    let onMove: (Int, Int) -> Void
+    
+    @State private var isDragging = false
+    @State private var dragOverIndex: Int? = nil
+    
+    var body: some View {
+            Button(action: onSelect) {
+                HStack(spacing: 8) {
+                    // Colored indicator
+                    Circle()
+                        .fill(meta.color.color)
+                        .frame(width: 6, height: 6)
+                    Text(meta.name.isEmpty ? "Session \(index + 1)" : meta.name)
+                        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                        .foregroundColor(isSelected ? .primary : .secondary)
+                }
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isSelected ? Color(NSColor.windowBackgroundColor).opacity(0.6) : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(isSelected ? Color.accentColor.opacity(0.6) : (dragOverIndex == index ? Color.accentColor.opacity(0.4) : Color.secondary.opacity(0.2)), lineWidth: dragOverIndex == index ? 2 : 1)
+                )
+                .opacity(isDragging ? 0.5 : 1.0)
+                .scaleEffect(isDragging ? 0.95 : 1.0)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Terminal tab: \(meta.name.isEmpty ? "Session \(index + 1)" : meta.name)")
+            .accessibilityHint(isSelected ? "Currently selected tab. Drag to reorder tabs." : "Tab \(index + 1). Double-tap to select. Drag to reorder.")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .draggable(session.id.uuidString) {
+            Text(meta.name.isEmpty ? "Session \(index + 1)" : meta.name)
+                .padding(8)
+                .background(Color(NSColor.windowBackgroundColor))
+                .cornerRadius(4)
+        }
+        .dropDestination(for: String.self) { items, location in
+            guard let draggedUUIDString = items.first,
+                  let draggedUUID = UUID(uuidString: draggedUUIDString),
+                  let draggedIndex = findSessionIndex(uuid: draggedUUID),
+                  draggedIndex != index else {
+                return false
+            }
+            onMove(draggedIndex, index)
+            return true
+        } isTargeted: { targeted in
+            dragOverIndex = targeted ? index : nil
+        }
+        .onDrag {
+            isDragging = true
+            return NSItemProvider(object: session.id.uuidString as NSString)
+        } preview: {
+            Text(meta.name.isEmpty ? "Session \(index + 1)" : meta.name)
+                .padding(8)
+                .background(Color(NSColor.windowBackgroundColor))
+                .cornerRadius(4)
+        }
+        .onChange(of: terminalManager.sessions) { _, _ in
+            isDragging = false
+            dragOverIndex = nil
+        }
+    }
+    
+    private func findSessionIndex(uuid: UUID) -> Int? {
+        return terminalManager.sessions.firstIndex(where: { $0.id == uuid })
+    }
+}
 
 // MARK: – Preview
 struct ContentView_Previews: PreviewProvider {

@@ -53,6 +53,9 @@ ProTerm/
 | **Button bar** – New Tab, Close Tab, Preferences | Top‑most toolbar; the gear icon opens the Settings pane. |
 | **Tab bar** | Each tab is labeled *Session 1*, *Session 2* …; click to switch. |
 | **Search** | Type in the search field that appears when you start typing; matching lines are highlighted. |
+| **Profiles & translucent themes** | Settings → Appearance → pick a preset card or create your own (font, colors, corner radius, padding, glass materials). |
+| **Font coordination** | Settings → Font tab – changes stay in sync with the active Appearance Profile. |
+| **Bracketed paste & mouse reporting** | Settings → Terminal → enable “Protect pasted commands” and “Advertise mouse reporting”; PTY sessions start emitting OSC/CSI toggles and the terminal surface captures mouse events for TUIs that support it. |
 | **SSH session** | In the button bar add a custom “New SSH” action (future UI) – for now you can call `SSHSessionManager.shared.startSSH(to: "host")` from code. |
 | **Preferences** | Settings → Appearance (dark/light), Font selector, Shortcut placeholder. |
 | **Drag‑and‑drop** | Drop any text file onto the window – it opens in a new read‑only tab. |
@@ -69,7 +72,9 @@ ProTerm/
 - **Plugin ecosystem** – define a protocol that plugins must conform to (e.g., `ProTermPlugin`) and load them dynamically via `Bundle.load()`. 
 
 ## Persistence & State Saving
-- Session IDs are saved by `SessionPersistence` to `~/Library/Application Support/ProTerm/sessions.json`. On launch the app restores the same number of tabs (content is re‑initialized). Extend this to also store scroll position, command history, and theme preferences.
+- Session IDs are saved by `SessionPersistence` to `~/Library/Application Support/ProTerm/sessions.json`. On launch the app restores the same number of tabs (content is re‑initialized).
+- Appearance Profiles now persist to `~/Library/Application Support/ProTerm/Profiles.json`, can be imported/exported via the Appearance pane, and optionally sync over iCloud (`NSUbiquitousKeyValueStore`) when the toggle is enabled.
+- Extend this further to capture scroll position, command history, and per-session layout metadata if desired.
 
 ## Known Limitations (as of this scaffold)
 - The terminal view only displays static text; real PTY handling is not yet implemented.

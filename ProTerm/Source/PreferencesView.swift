@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
 struct PreferencesView: View {
     @EnvironmentObject var terminalManager: TerminalManager
@@ -10,6 +11,7 @@ struct PreferencesView: View {
     @EnvironmentObject var fontManager: FontManager
     @EnvironmentObject var advancedFeatures: AdvancedFeatures
     @EnvironmentObject var productivityTools: ProductivityTools
+    @EnvironmentObject var integrationFeatures: IntegrationFeatures
     @EnvironmentObject var aiManager: AIManager
 
     // Simple enum to drive the segmented picker.
@@ -22,6 +24,7 @@ struct PreferencesView: View {
         case aliases       = "Aliases"
         case prompt        = "Prompt"
         case quickCommands = "Quick Commands"
+        case ssh           = "SSH"
         case ai            = "AI"
     }
 
@@ -111,6 +114,8 @@ struct PreferencesView: View {
                         PromptSettings()
                     case .quickCommands:
                         QuickCommandsSettings()
+                    case .ssh:
+                        SSHConnectionSettings()
                     case .ai:
                         AISettings()
                     }
@@ -142,70 +147,9 @@ struct PreferencesView: View {
 
 // MARK: – Appearance pane (theme colours)
 struct AppearanceSettings: View {
-    @EnvironmentObject var themeManager: ThemeManager
-    @EnvironmentObject var lineNumbersManager: LineNumbersManager
-    @State private var useDark = true
-
-    // Store the name of the currently selected preset.
-    @State private var selectedPresetName = "Dark"
-
-    // Define a few preset themes (you can expand this list).
-    private let presets: [(name: String, theme: Theme)] = [
-        ("Dark", Theme(background: .black,
-                       foreground: .green,
-                       cursor: .white)),
-        ("Light", Theme(background: .white,
-                        foreground: .black,
-                        cursor: .orange)),
-        ("Solarized",
-         Theme(background: Color(red: 0.0, green: 0.17, blue: 0.21),
-               foreground: Color(red: 0.51, green: 0.58, blue: 0.47),
-               cursor: .red))
-    ]
-
     var body: some View {
         ScrollView {
-            Form {
-                // Line numbers toggle
-                Toggle("Show Line Numbers", isOn: $lineNumbersManager.showLineNumbers)
-                    .onChange(of: lineNumbersManager.showLineNumbers) { _, newValue in
-                        lineNumbersManager.setLineNumbers(newValue)
-                    }
-                
-                Divider()
-                
-                // Dark‑mode toggle (kept for backward compatibility)
-                Toggle("Dark Theme", isOn: $useDark)
-                    .onChange(of: useDark) { _, newValue in
-                        themeManager.current = Theme(
-                            background: newValue ? .black : .white,
-                            foreground: newValue ? .green : .black,
-                            cursor: .orange
-                        )
-                    }
-
-                // Preset theme picker – uses the preset name (String) which is Hashable.
-                Picker("Preset Theme", selection: $selectedPresetName) {
-                    ForEach(presets, id: \.name) { entry in
-                        Text(entry.name).tag(entry.name)
-                    }
-                }
-                .onChange(of: selectedPresetName) { _, newValue in
-                    if let preset = presets.first(where: { $0.name == newValue }) {
-                        themeManager.current = preset.theme
-                    }
-                }
-            }
-        }
-        .onAppear {
-            // Initialise the picker to match the current theme if possible.
-            if let matching = presets.first(where: {
-                $0.theme.background == themeManager.current.background &&
-                $0.theme.foreground == themeManager.current.foreground &&
-                $0.theme.cursor == themeManager.current.cursor
-            }) {
-                selectedPresetName = matching.name
-            }
+            AppearanceProfileSection()
         }
     }
 }
@@ -213,18 +157,29 @@ struct AppearanceSettings: View {
 // MARK: – Font pane (font name + size)
 struct FontSettings: View {
     @EnvironmentObject var fontManager: FontManager
+    @EnvironmentObject var themeManager: ThemeManager
 
     var body: some View {
         // Use a VStack with top alignment so the content stays near the top.
         VStack(alignment: .leading, spacing: 16) {
             // Font picker
             FontPickerView(selectedFontName: $fontManager.fontName)
+                .onChange(of: fontManager.fontName) { _, newValue in
+                    if themeManager.activeProfile.fontName != newValue {
+                        themeManager.updateActiveProfileFontAsync(name: newValue)
+                    }
+                }
 
             // Font size slider
             VStack(alignment: .leading, spacing: 8) {
                 Text("Font Size: \(Int(fontManager.fontSize))")
                 Slider(value: $fontManager.fontSize, in: 10...24, step: 1) {
                     Text("Font Size")
+                }
+                .onChange(of: fontManager.fontSize) { _, newValue in
+                    if themeManager.activeProfile.fontSize != newValue {
+                        themeManager.updateActiveProfileFontAsync(size: newValue)
+                    }
                 }
             }
             .padding(.top, -20) // Move font size controls UP by 20 pixels
@@ -237,16 +192,19 @@ struct FontSettings: View {
 
 // MARK: – Shortcut pane
 struct ShortcutSettings: View {
+    @EnvironmentObject var keyboardShortcutsManager: KeyboardShortcutsManager
     @StateObject private var customShortcutsManager = CustomShortcutsManager()
     @State private var showingAddShortcut = false
     @State private var newShortcutName = ""
     @State private var newShortcutKey = ""
     @State private var newShortcutModifiers = ModifierFlags()
+    @State private var editingAction: KeyboardShortcutsManager.Action?
+    @State private var showingEditSheet = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            // Section: Existing Keyboard Shortcuts (Read-only reference)
-            GroupBox("Existing Keyboard Shortcuts (Reference)") {
+            // Section: Keyboard Shortcuts (Editable)
+            GroupBox("Keyboard Shortcuts") {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(KeyboardShortcutsManager.shortcuts, id: \.description) { shortcut in
@@ -254,13 +212,42 @@ struct ShortcutSettings: View {
                                 Text(shortcut.description)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 Spacer()
-                                Text(formatShortcut(shortcut))
-                                    .font(.system(.body, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color(NSColor.controlBackgroundColor))
-                                    .cornerRadius(4)
+                                
+                                // Show current binding (custom or default)
+                                let (currentKey, currentModifiers) = keyboardShortcutsManager.getShortcut(for: shortcut.action)
+                                let isCustom = keyboardShortcutsManager.hasCustomShortcut(for: shortcut.action)
+                                
+                                HStack(spacing: 4) {
+                                    if isCustom {
+                                        Image(systemName: "pencil.circle.fill")
+                                            .foregroundColor(.blue)
+                                            .font(.caption)
+                                    }
+                                    Text(formatShortcut(key: currentKey, modifiers: currentModifiers))
+                                        .font(.system(.body, design: .monospaced))
+                                        .foregroundColor(isCustom ? .blue : .secondary)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(Color(NSColor.controlBackgroundColor))
+                                        .cornerRadius(4)
+                                }
+                                
+                                Button(action: {
+                                    editingAction = shortcut.action
+                                    showingEditSheet = true
+                                }) {
+                                    Text("Edit")
+                                }
+                                .buttonStyle(.bordered)
+                                
+                                if isCustom {
+                                    Button(action: {
+                                        keyboardShortcutsManager.resetShortcut(for: shortcut.action)
+                                    }) {
+                                        Text("Reset")
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
                             }
                             .padding(.vertical, 2)
                         }
@@ -268,6 +255,16 @@ struct ShortcutSettings: View {
                     .padding()
                 }
                 .frame(maxHeight: 300)
+                
+                HStack {
+                    Spacer()
+                    Button("Reset All to Defaults") {
+                        keyboardShortcutsManager.resetAllShortcuts()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 8)
             }
             
             Divider()
@@ -355,16 +352,36 @@ struct ShortcutSettings: View {
                 }
             )
         }
+        .sheet(isPresented: $showingEditSheet) {
+            if let action = editingAction {
+                EditShortcutSheet(
+                    action: action,
+                    keyboardShortcutsManager: keyboardShortcutsManager,
+                    onSave: {
+                        showingEditSheet = false
+                        editingAction = nil
+                    },
+                    onCancel: {
+                        showingEditSheet = false
+                        editingAction = nil
+                    }
+                )
+            }
+        }
+    }
+    
+    private func formatShortcut(key: KeyEquivalent, modifiers: EventModifiers) -> String {
+        var parts: [String] = []
+        if modifiers.contains(.command) { parts.append("⌘") }
+        if modifiers.contains(.shift) { parts.append("⇧") }
+        if modifiers.contains(.option) { parts.append("⌥") }
+        if modifiers.contains(.control) { parts.append("⌃") }
+        parts.append(key.character.uppercased())
+        return parts.joined(separator: "")
     }
     
     private func formatShortcut(_ shortcut: KeyboardShortcutsManager.Shortcut) -> String {
-        var parts: [String] = []
-        if shortcut.modifiers.contains(.command) { parts.append("⌘") }
-        if shortcut.modifiers.contains(.shift) { parts.append("⇧") }
-        if shortcut.modifiers.contains(.option) { parts.append("⌥") }
-        if shortcut.modifiers.contains(.control) { parts.append("⌃") }
-        parts.append(shortcut.key.character.uppercased())
-        return parts.joined(separator: "")
+        formatShortcut(key: shortcut.key, modifiers: shortcut.modifiers)
     }
     
     private func formatCustomShortcut(_ shortcut: CustomShortcutsManager.CustomShortcut) -> String {
@@ -525,6 +542,274 @@ struct AddShortcutSheet: View {
     }
 }
 
+// MARK: - Edit Shortcut Sheet
+struct EditShortcutSheet: View {
+    let action: KeyboardShortcutsManager.Action
+    @ObservedObject var keyboardShortcutsManager: KeyboardShortcutsManager
+    let onSave: () -> Void
+    let onCancel: () -> Void
+    
+    @State private var capturedKey: KeyEquivalent?
+    @State private var capturedModifiers: EventModifiers = []
+    @State private var isRecording: Bool = false
+    @State private var conflictMessage: String?
+    @State private var eventMonitor: Any?
+    
+    private var actionDescription: String {
+        if let shortcut = KeyboardShortcutsManager.shortcuts.first(where: { $0.action.identifier == action.identifier }) {
+            return shortcut.description
+        }
+        return "Unknown Action"
+    }
+    
+    private var currentShortcut: (key: KeyEquivalent, modifiers: EventModifiers) {
+        keyboardShortcutsManager.getShortcut(for: action)
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Edit Keyboard Shortcut")
+                .font(.title2)
+                .fontWeight(.bold)
+            
+            Text(actionDescription)
+                .font(.headline)
+                .foregroundColor(.secondary)
+            
+            Divider()
+            
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Current Shortcut")
+                    .font(.headline)
+                
+                let (currentKey, currentMods) = currentShortcut
+                Text(formatShortcut(key: currentKey, modifiers: currentMods))
+                    .font(.system(.body, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(4)
+                
+                Divider()
+                
+                Text("New Shortcut")
+                    .font(.headline)
+                
+                HStack {
+                    Text(capturedKey != nil ? formatShortcut(key: capturedKey!, modifiers: capturedModifiers) : "Press Record and type your shortcut")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundColor(capturedKey != nil ? .primary : .secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(NSColor.controlBackgroundColor))
+                        .cornerRadius(4)
+                    
+                    Button(action: {
+                        if isRecording {
+                            stopRecording()
+                        } else {
+                            startRecording()
+                        }
+                    }) {
+                        Text(isRecording ? "Stop Recording" : "Record")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                }
+                
+                if isRecording {
+                    Text("Press the key combination you want to use...")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                }
+                
+                if let conflict = conflictMessage {
+                    Text(conflict)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                
+                Text("Modifiers")
+                    .font(.headline)
+                    .padding(.top, 8)
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Command (⌘)", isOn: Binding(
+                        get: { capturedModifiers.contains(.command) },
+                        set: { if $0 { capturedModifiers.insert(.command) } else { capturedModifiers.remove(.command) } }
+                    ))
+                    .disabled(isRecording)
+                    
+                    Toggle("Shift (⇧)", isOn: Binding(
+                        get: { capturedModifiers.contains(.shift) },
+                        set: { if $0 { capturedModifiers.insert(.shift) } else { capturedModifiers.remove(.shift) } }
+                    ))
+                    .disabled(isRecording)
+                    
+                    Toggle("Option (⌥)", isOn: Binding(
+                        get: { capturedModifiers.contains(.option) },
+                        set: { if $0 { capturedModifiers.insert(.option) } else { capturedModifiers.remove(.option) } }
+                    ))
+                    .disabled(isRecording)
+                    
+                    Toggle("Control (⌃)", isOn: Binding(
+                        get: { capturedModifiers.contains(.control) },
+                        set: { if $0 { capturedModifiers.insert(.control) } else { capturedModifiers.remove(.control) } }
+                    ))
+                    .disabled(isRecording)
+                }
+            }
+            
+            Spacer()
+            
+            HStack {
+                Spacer()
+                Button("Cancel", action: {
+                    stopRecording()
+                    onCancel()
+                })
+                    .keyboardShortcut(.escape)
+                Button("Save", action: {
+                    if let key = capturedKey {
+                        checkConflict(key: key, modifiers: capturedModifiers) { hasConflict in
+                            if !hasConflict {
+                                keyboardShortcutsManager.updateShortcut(for: action, key: key, modifiers: capturedModifiers)
+                                stopRecording()
+                                onSave()
+                            }
+                        }
+                    } else {
+                        onSave()
+                    }
+                })
+                    .buttonStyle(.borderedProminent)
+                    .disabled(capturedKey == nil || capturedModifiers.isEmpty)
+                    .keyboardShortcut(.return)
+            }
+        }
+        .padding()
+        .frame(width: 500, height: 500)
+        .onAppear {
+            let (key, mods) = currentShortcut
+            capturedKey = key
+            capturedModifiers = mods
+        }
+        .onDisappear {
+            stopRecording()
+        }
+    }
+    
+    private func startRecording() {
+        isRecording = true
+        conflictMessage = nil
+        capturedKey = nil
+        capturedModifiers = []
+        
+        // Set up event monitor
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
+            guard isRecording else { return event }
+            
+            let modifiers = event.modifierFlags
+            var eventModifiers: EventModifiers = []
+            if modifiers.contains(.command) { eventModifiers.insert(.command) }
+            if modifiers.contains(.shift) { eventModifiers.insert(.shift) }
+            if modifiers.contains(.option) { eventModifiers.insert(.option) }
+            if modifiers.contains(.control) { eventModifiers.insert(.control) }
+            
+            // Get the key character
+            let keyChar: Character?
+            if let chars = event.charactersIgnoringModifiers?.lowercased(), !chars.isEmpty {
+                keyChar = chars.first
+            } else {
+                switch event.keyCode {
+                case 0: keyChar = "a"
+                case 1: keyChar = "s"
+                case 2: keyChar = "d"
+                case 3: keyChar = "f"
+                case 4: keyChar = "h"
+                case 5: keyChar = "g"
+                case 6: keyChar = "z"
+                case 7: keyChar = "x"
+                case 8: keyChar = "c"
+                case 9: keyChar = "v"
+                case 11: keyChar = "b"
+                case 12: keyChar = "q"
+                case 13: keyChar = "w"
+                case 14: keyChar = "e"
+                case 15: keyChar = "r"
+                case 16: keyChar = "y"
+                case 17: keyChar = "t"
+                case 31: keyChar = "o"
+                case 32: keyChar = "u"
+                case 34: keyChar = "i"
+                case 35: keyChar = "p"
+                case 37: keyChar = "l"
+                case 38: keyChar = "j"
+                case 40: keyChar = "k"
+                case 45: keyChar = "n"
+                case 46: keyChar = "m"
+                case 18: keyChar = "1"
+                case 19: keyChar = "2"
+                case 20: keyChar = "3"
+                case 21: keyChar = "4"
+                case 23: keyChar = "5"
+                case 22: keyChar = "6"
+                case 26: keyChar = "7"
+                case 28: keyChar = "8"
+                case 25: keyChar = "9"
+                default: keyChar = nil
+                }
+            }
+            
+            if let char = keyChar, !eventModifiers.isEmpty {
+                DispatchQueue.main.async {
+                    self.capturedKey = KeyEquivalent(char)
+                    self.capturedModifiers = eventModifiers
+                    self.stopRecording()
+                }
+                return nil // Consume the event
+            }
+            
+            return event
+        }
+    }
+    
+    private func stopRecording() {
+        isRecording = false
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+    }
+    
+    private func checkConflict(key: KeyEquivalent, modifiers: EventModifiers, completion: @escaping (Bool) -> Void) {
+        // Check against all shortcuts except the current one
+        for shortcut in KeyboardShortcutsManager.shortcuts {
+            if shortcut.action.identifier != action.identifier {
+                let (otherKey, otherMods) = keyboardShortcutsManager.getShortcut(for: shortcut.action)
+                if otherKey == key && otherMods == modifiers {
+                    conflictMessage = "This shortcut is already assigned to: \(shortcut.description)"
+                    completion(true)
+                    return
+                }
+            }
+        }
+        conflictMessage = nil
+        completion(false)
+    }
+    
+    private func formatShortcut(key: KeyEquivalent, modifiers: EventModifiers) -> String {
+        var parts: [String] = []
+        if modifiers.contains(.command) { parts.append("⌘") }
+        if modifiers.contains(.shift) { parts.append("⇧") }
+        if modifiers.contains(.option) { parts.append("⌥") }
+        if modifiers.contains(.control) { parts.append("⌃") }
+        parts.append(key.character.uppercased())
+        return parts.joined(separator: "")
+    }
+}
+
 // MARK: – Overview Settings
 struct OverviewSettings: View {
     @Binding var selectedTab: PreferencesView.Tab
@@ -602,6 +887,15 @@ struct OverviewSettings: View {
                         color: .yellow
                     ) {
                         selectedTab = .quickCommands
+                    }
+                    
+                    PreferenceCard(
+                        title: "SSH",
+                        description: "SSH connections and key management",
+                        icon: "network",
+                        color: .teal
+                    ) {
+                        selectedTab = .ssh
                     }
                     
                     PreferenceCard(
@@ -1285,6 +1579,445 @@ struct AISettings: View {
         guard editingURL != aiManager.lmStudioURL else { return }
         aiManager.lmStudioURL = editingURL
         UserDefaults.standard.set(editingURL, forKey: "lmStudioURL")
+    }
+}
+
+// MARK: - SSH Connection Settings
+struct SSHConnectionSettings: View {
+    @EnvironmentObject var integrationFeatures: IntegrationFeatures
+    @State private var showingAddConnection = false
+    @State private var showingAddKey = false
+    @State private var editingConnection: IntegrationFeatures.SSHConnection?
+    @State private var showingEditConnection = false
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                // SSH Connections Section
+                GroupBox("SSH Connections") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Manage your saved SSH connections")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button(action: {
+                                editingConnection = nil
+                                showingAddConnection = true
+                            }) {
+                                HStack {
+                                    Image(systemName: "plus.circle.fill")
+                                    Text("Add Connection")
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        
+                        if integrationFeatures.sshConnections.isEmpty {
+                            Text("No SSH connections saved yet.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .italic()
+                                .padding(.vertical, 8)
+                        } else {
+                            ForEach(integrationFeatures.sshConnections) { connection in
+                                SSHConnectionRow(
+                                    connection: connection,
+                                    integrationFeatures: integrationFeatures,
+                                    onEdit: {
+                                        editingConnection = connection
+                                        showingEditConnection = true
+                                    },
+                                    onDelete: {
+                                        integrationFeatures.removeSSHConnection(connection)
+                                    },
+                                    onConnect: {
+                                        integrationFeatures.connectSSH(connection)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    .padding()
+                }
+                
+                Divider()
+                
+                // SSH Keys Section
+                GroupBox("SSH Keys") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Manage your SSH keys")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button(action: {
+                                showingAddKey = true
+                            }) {
+                                HStack {
+                                    Image(systemName: "plus.circle.fill")
+                                    Text("Add SSH Key")
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        
+                        if integrationFeatures.sshKeys.isEmpty {
+                            Text("No SSH keys added yet.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .italic()
+                                .padding(.vertical, 8)
+                        } else {
+                            ForEach(integrationFeatures.sshKeys) { key in
+                                SSHKeyRow(
+                                    key: key,
+                                    integrationFeatures: integrationFeatures,
+                                    onSetDefault: {
+                                        integrationFeatures.setDefaultSSHKey(key)
+                                    },
+                                    onDelete: {
+                                        integrationFeatures.removeSSHKey(key)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    .padding()
+                }
+            }
+            .padding()
+        }
+        .sheet(isPresented: $showingAddConnection) {
+            AddEditSSHConnectionSheet(
+                connection: nil,
+                integrationFeatures: integrationFeatures,
+                onSave: {
+                    showingAddConnection = false
+                },
+                onCancel: {
+                    showingAddConnection = false
+                }
+            )
+        }
+        .sheet(isPresented: $showingEditConnection) {
+            if let connection = editingConnection {
+                AddEditSSHConnectionSheet(
+                    connection: connection,
+                    integrationFeatures: integrationFeatures,
+                    onSave: {
+                        showingEditConnection = false
+                        editingConnection = nil
+                    },
+                    onCancel: {
+                        showingEditConnection = false
+                        editingConnection = nil
+                    }
+                )
+            }
+        }
+        .sheet(isPresented: $showingAddKey) {
+            AddSSHKeySheet(
+                integrationFeatures: integrationFeatures,
+                onSave: {
+                    showingAddKey = false
+                },
+                onCancel: {
+                    showingAddKey = false
+                }
+            )
+        }
+    }
+}
+
+// MARK: - SSH Connection Row
+struct SSHConnectionRow: View {
+    let connection: IntegrationFeatures.SSHConnection
+    @ObservedObject var integrationFeatures: IntegrationFeatures
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+    let onConnect: () -> Void
+    
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(connection.name)
+                        .font(.headline)
+                    if connection.isActive {
+                        Circle()
+                            .fill(.green)
+                            .frame(width: 8, height: 8)
+                        Text("Connected")
+                            .font(.caption)
+                            .foregroundColor(.green)
+                    }
+                }
+                Text("\(connection.username)@\(connection.host):\(connection.port)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                if let lastConnected = connection.lastConnected {
+                    Text("Last connected: \(lastConnected, style: .relative)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+            HStack(spacing: 8) {
+                if !connection.isActive {
+                    Button("Connect", action: onConnect)
+                        .buttonStyle(.bordered)
+                } else {
+                    Button("Disconnect") {
+                        integrationFeatures.disconnectSSH()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Button("Edit", action: onEdit)
+                    .buttonStyle(.bordered)
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding()
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+        .cornerRadius(8)
+    }
+}
+
+// MARK: - SSH Key Row
+struct SSHKeyRow: View {
+    let key: IntegrationFeatures.SSHKey
+    @ObservedObject var integrationFeatures: IntegrationFeatures
+    let onSetDefault: () -> Void
+    let onDelete: () -> Void
+    
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(key.name)
+                        .font(.headline)
+                    if key.isDefault {
+                        Text("Default")
+                            .font(.caption)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(4)
+                    }
+                }
+                Text("Type: \(key.type.rawValue)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Path: \(key.path)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Fingerprint: \(key.fingerprint)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            HStack(spacing: 8) {
+                if !key.isDefault {
+                    Button("Set as Default", action: onSetDefault)
+                        .buttonStyle(.bordered)
+                }
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding()
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+        .cornerRadius(8)
+    }
+}
+
+// MARK: - Add/Edit SSH Connection Sheet
+struct AddEditSSHConnectionSheet: View {
+    let connection: IntegrationFeatures.SSHConnection?
+    @ObservedObject var integrationFeatures: IntegrationFeatures
+    let onSave: () -> Void
+    let onCancel: () -> Void
+    
+    @State private var name: String = ""
+    @State private var host: String = ""
+    @State private var port: Int = 22
+    @State private var username: String = ""
+    @State private var selectedKeyPath: String? = nil
+    
+    var isEditing: Bool {
+        connection != nil
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(isEditing ? "Edit SSH Connection" : "Add SSH Connection")
+                .font(.title2)
+                .fontWeight(.bold)
+            
+            Divider()
+            
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Connection Name")
+                    .font(.headline)
+                TextField("e.g., Production Server", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                
+                Text("Host")
+                    .font(.headline)
+                TextField("e.g., example.com", text: $host)
+                    .textFieldStyle(.roundedBorder)
+                
+                Text("Port")
+                    .font(.headline)
+                TextField("", value: $port, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+                
+                Text("Username")
+                    .font(.headline)
+                TextField("e.g., admin", text: $username)
+                    .textFieldStyle(.roundedBorder)
+                
+                Text("SSH Key (Optional)")
+                    .font(.headline)
+                Picker("SSH Key", selection: $selectedKeyPath) {
+                    Text("None").tag(nil as String?)
+                    ForEach(integrationFeatures.sshKeys) { key in
+                        Text(key.name).tag(key.path as String?)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+            
+            Spacer()
+            
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.escape)
+                Button("Save", action: {
+                    if isEditing, let conn = connection {
+                        // Update existing connection
+                        integrationFeatures.removeSSHConnection(conn)
+                    }
+                    integrationFeatures.addSSHConnection(
+                        name: name,
+                        host: host,
+                        port: port,
+                        username: username,
+                        keyPath: selectedKeyPath
+                    )
+                    onSave()
+                })
+                    .buttonStyle(.borderedProminent)
+                    .disabled(name.isEmpty || host.isEmpty || username.isEmpty)
+                    .keyboardShortcut(.return)
+            }
+        }
+        .padding()
+        .frame(width: 500, height: 400)
+        .onAppear {
+            if let conn = connection {
+                name = conn.name
+                host = conn.host
+                port = conn.port
+                username = conn.username
+                selectedKeyPath = conn.keyPath
+            }
+        }
+    }
+}
+
+// MARK: - Add SSH Key Sheet
+struct AddSSHKeySheet: View {
+    @ObservedObject var integrationFeatures: IntegrationFeatures
+    let onSave: () -> Void
+    let onCancel: () -> Void
+    
+    @State private var name: String = ""
+    @State private var keyPath: String = ""
+    @State private var keyType: IntegrationFeatures.SSHKeyType = .ed25519
+    @State private var isDefault: Bool = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Add SSH Key")
+                .font(.title2)
+                .fontWeight(.bold)
+            
+            Divider()
+            
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Key Name")
+                    .font(.headline)
+                TextField("e.g., My Laptop Key", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                
+                Text("Key Path")
+                    .font(.headline)
+                HStack {
+                    TextField("e.g., ~/.ssh/id_ed25519", text: $keyPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse...") {
+                        let panel = NSOpenPanel()
+                        panel.allowsMultipleSelection = false
+                        panel.canChooseDirectories = false
+                        panel.canChooseFiles = true
+                        panel.allowedContentTypes = [.data]
+                        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh")
+                        
+                        if panel.runModal() == .OK {
+                            if let url = panel.url {
+                                keyPath = url.path
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                }
+                
+                Text("Key Type")
+                    .font(.headline)
+                Picker("Key Type", selection: $keyType) {
+                    ForEach(IntegrationFeatures.SSHKeyType.allCases, id: \.self) { type in
+                        Text(type.rawValue).tag(type)
+                    }
+                }
+                .pickerStyle(.menu)
+                
+                Toggle("Set as default key", isOn: $isDefault)
+            }
+            
+            Spacer()
+            
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.escape)
+                Button("Save", action: {
+                    integrationFeatures.addSSHKey(
+                        name: name,
+                        path: keyPath,
+                        type: keyType,
+                        isDefault: isDefault
+                    )
+                    onSave()
+                })
+                    .buttonStyle(.borderedProminent)
+                    .disabled(name.isEmpty || keyPath.isEmpty)
+                    .keyboardShortcut(.return)
+            }
+        }
+        .padding()
+        .frame(width: 500, height: 400)
     }
 }
 

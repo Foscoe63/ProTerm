@@ -15,11 +15,15 @@ final class TerminalManager: ObservableObject {
     /// Tab metadata (names, colors) indexed by session ID
     @Published var tabMetadata: [UUID: TabMetadata] = [:]
     
+    /// Scroll positions indexed by session ID (0.0 = top, 1.0 = bottom)
+    @Published var scrollPositions: [UUID: Double] = [:]
+    
     /// Version counter to force TabView updates when metadata changes
     @Published var tabMetadataVersion: Int = 0
     
     /// Reference to shell manager for creating new sessions
     private var shellManager: ShellManager?
+    private var titleObserver: NSObjectProtocol?
 
     /// Restore persisted session IDs (or create a default session).
     init() {
@@ -28,6 +32,30 @@ final class TerminalManager: ObservableObject {
             addSession()               // create a default first session
         } else {
             for _ in savedIDs { addSession() }
+        }
+        
+        titleObserver = NotificationCenter.default.addObserver(
+            forName: .terminalTitleDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let sessionId = notification.object as? UUID
+            let title = notification.userInfo?["title"] as? String
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let sessionId,
+                      let title else { return }
+                let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                let displayName = trimmed.isEmpty ? "Session" : trimmed
+                self.updateTabName(for: sessionId, name: displayName)
+            }
+        }
+    }
+    
+    deinit {
+        Task { @MainActor [weak self] in
+            guard let token = self?.titleObserver else { return }
+            NotificationCenter.default.removeObserver(token)
         }
     }
     

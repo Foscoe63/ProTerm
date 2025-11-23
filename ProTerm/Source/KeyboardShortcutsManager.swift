@@ -9,6 +9,7 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var isEnabled: Bool = true
     @Published var lastAction: Action?
+    @Published var userShortcutOverrides: [String: UserShortcut] = [:] // Key is action identifier
     
     // MARK: - Event Monitor
     nonisolated(unsafe) private var eventMonitor: Any?
@@ -16,6 +17,7 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
     // MARK: - Initialization
     override init() {
         super.init()
+        loadUserShortcuts()
         setupEventMonitor()
     }
     
@@ -94,7 +96,7 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
     }
     
     // MARK: - Shortcut Actions
-    enum Action {
+    enum Action: Codable, Hashable {
         case selectAll
         case quickSearch
         case clearScreen
@@ -107,6 +109,52 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
         case replace
         case focusInput
         case commandPalette
+        
+        var identifier: String {
+            switch self {
+            case .selectAll: return "selectAll"
+            case .quickSearch: return "quickSearch"
+            case .clearScreen: return "clearScreen"
+            case .newTab: return "newTab"
+            case .closeTab: return "closeTab"
+            case .switchTab(let index): return "switchTab_\(index)"
+            case .copy: return "copy"
+            case .paste: return "paste"
+            case .find: return "find"
+            case .replace: return "replace"
+            case .focusInput: return "focusInput"
+            case .commandPalette: return "commandPalette"
+            }
+        }
+    }
+    
+    // MARK: - User Shortcut Override
+    struct UserShortcut: Codable {
+        let key: String
+        let modifiers: ModifierFlags
+        
+        struct ModifierFlags: Codable {
+            var command: Bool
+            var shift: Bool
+            var option: Bool
+            var control: Bool
+            
+            init(command: Bool = false, shift: Bool = false, option: Bool = false, control: Bool = false) {
+                self.command = command
+                self.shift = shift
+                self.option = option
+                self.control = control
+            }
+            
+            func toEventModifiers() -> EventModifiers {
+                var modifiers: EventModifiers = []
+                if command { modifiers.insert(.command) }
+                if shift { modifiers.insert(.shift) }
+                if option { modifiers.insert(.option) }
+                if control { modifiers.insert(.control) }
+                return modifiers
+            }
+        }
     }
     
     // MARK: - Shortcut Definitions
@@ -171,6 +219,19 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
             }
         }
         
+        // First check user overrides
+        for (actionId, userShortcut) in userShortcutOverrides {
+            let userModifiers = userShortcut.modifiers.toEventModifiers()
+            if let keyChar = userShortcut.key.first, KeyEquivalent(keyChar) == key && userModifiers == modifiers {
+                // Find the action by identifier
+                if let action = findAction(by: actionId) {
+                    handleAction(action)
+                    return true
+                }
+            }
+        }
+        
+        // Then check default shortcuts
         for shortcut in Self.shortcuts {
             if shortcut.key == key && shortcut.modifiers == modifiers {
                 handleAction(shortcut.action)
@@ -178,6 +239,70 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
             }
         }
         return false
+    }
+    
+    private func findAction(by identifier: String) -> Action? {
+        for shortcut in Self.shortcuts {
+            if shortcut.action.identifier == identifier {
+                return shortcut.action
+            }
+        }
+        return nil
+    }
+    
+    // MARK: - User Shortcut Management
+    func updateShortcut(for action: Action, key: KeyEquivalent, modifiers: EventModifiers) {
+        let actionId = action.identifier
+        let modifierFlags = UserShortcut.ModifierFlags(
+            command: modifiers.contains(.command),
+            shift: modifiers.contains(.shift),
+            option: modifiers.contains(.option),
+            control: modifiers.contains(.control)
+        )
+        userShortcutOverrides[actionId] = UserShortcut(key: String(key.character), modifiers: modifierFlags)
+        saveUserShortcuts()
+    }
+    
+    func resetShortcut(for action: Action) {
+        let actionId = action.identifier
+        userShortcutOverrides.removeValue(forKey: actionId)
+        saveUserShortcuts()
+    }
+    
+    func resetAllShortcuts() {
+        userShortcutOverrides.removeAll()
+        saveUserShortcuts()
+    }
+    
+    func getShortcut(for action: Action) -> (key: KeyEquivalent, modifiers: EventModifiers) {
+        let actionId = action.identifier
+        if let userShortcut = userShortcutOverrides[actionId],
+           let keyChar = userShortcut.key.first {
+            return (KeyEquivalent(keyChar), userShortcut.modifiers.toEventModifiers())
+        }
+        // Return default
+        if let defaultShortcut = Self.shortcuts.first(where: { $0.action.identifier == actionId }) {
+            return (defaultShortcut.key, defaultShortcut.modifiers)
+        }
+        // Fallback - use space character as default
+        return (KeyEquivalent(" "), [])
+    }
+    
+    func hasCustomShortcut(for action: Action) -> Bool {
+        return userShortcutOverrides[action.identifier] != nil
+    }
+    
+    private func saveUserShortcuts() {
+        if let encoded = try? JSONEncoder().encode(userShortcutOverrides) {
+            UserDefaults.standard.set(encoded, forKey: "ProTermUserShortcuts")
+        }
+    }
+    
+    private func loadUserShortcuts() {
+        if let data = UserDefaults.standard.data(forKey: "ProTermUserShortcuts"),
+           let decoded = try? JSONDecoder().decode([String: UserShortcut].self, from: data) {
+            userShortcutOverrides = decoded
+        }
     }
     
     private func handleAction(_ action: Action) {

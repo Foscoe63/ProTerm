@@ -5,6 +5,7 @@ import Foundation
 struct SessionSnapshot: Codable {
     var id: UUID
     var title: String
+    var scrollPosition: Double = 0.0  // Scroll position as a ratio (0.0 = top, 1.0 = bottom)
 }
 
 final class SessionPersistence: @unchecked Sendable {

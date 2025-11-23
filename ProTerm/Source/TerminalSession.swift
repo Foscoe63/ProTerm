@@ -57,6 +57,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         
     private let ptyReadQueue = DispatchQueue(label: "proterm.pty.read")
     private var utf8Remainder = Data()
+    private var oscSequenceRemainder = ""
     private var isShuttingDown: Bool = false
     // Child PID for forkpty-based interactive sessions
     private var childPID: pid_t = 0
@@ -69,6 +70,16 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // Cached rows estimate (height). We don’t track actual pixel height here,
     // use a sensible default; can be exposed later for dynamic sizing
     private var rows: Int = 24
+    
+    private var bracketedPasteEnabled: Bool
+    private var mouseReportingEnabled: Bool
+    private var ioFeaturesApplied = false
+    private var ioSettingsObserver: NSObjectProtocol?
+    
+    private enum IOSettingKey {
+        static let bracketed = "ProTermBracketedPaste"
+        static let mouse = "ProTermMouseReporting"
+    }
     
 #if DEBUG
     @inline(__always) private func debugLog(_ message: String) {
@@ -227,6 +238,46 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         if result == 0 { return true }
         return errno != ESRCH
     }
+    
+    private func refreshIOFeatureFlags() {
+        let defaults = UserDefaults.standard
+        let newBracketed = defaults.object(forKey: IOSettingKey.bracketed) as? Bool ?? true
+        let newMouse = defaults.object(forKey: IOSettingKey.mouse) as? Bool ?? false
+        let flagsChanged = (newBracketed != bracketedPasteEnabled) || (newMouse != mouseReportingEnabled)
+        bracketedPasteEnabled = newBracketed
+        mouseReportingEnabled = newMouse
+        if flagsChanged && hasActivePTY {
+            tearDownIOFeatures()
+            configureIOFeaturesForActivePTY()
+        }
+    }
+    
+    private func configureIOFeaturesForActivePTY() {
+        guard hasActivePTY, !ioFeaturesApplied else { return }
+        if bracketedPasteEnabled {
+            sendInput("\u{001B}[?2004h")
+        }
+        if mouseReportingEnabled {
+            sendInput("\u{001B}[?1000h")
+            sendInput("\u{001B}[?1006h")
+        }
+        ioFeaturesApplied = true
+    }
+    
+    private func tearDownIOFeatures() {
+        guard ioFeaturesApplied, hasActivePTY else {
+            ioFeaturesApplied = false
+            return
+        }
+        if bracketedPasteEnabled {
+            sendInput("\u{001B}[?2004l")
+        }
+        if mouseReportingEnabled {
+            sendInput("\u{001B}[?1000l")
+            sendInput("\u{001B}[?1006l")
+        }
+        ioFeaturesApplied = false
+    }
 
     // MARK: - PTY Read Source (DispatchSourceRead)
     private func startPTYReadSource(masterFD: Int32) {
@@ -249,7 +300,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
                 if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
                     outputToAdd = "\n" + s
                 }
-                strongSelf.output = strongSelf.limitOutputSize(strongSelf.output + outputToAdd)
+                strongSelf.appendOutputChunk(outputToAdd)
             }
         }
 
@@ -289,7 +340,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
                     // Append on main via prepared closure
                     if !toAppend.isEmpty {
-                        appendOnMain(toAppend)
+                        let normalized = toAppend.precomposedStringWithCanonicalMapping
+                        appendOnMain(normalized)
                     }
                     // Loop to drain kernel buffer; break if no more data will be available now
                 } else if n == 0 {
@@ -311,6 +363,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
                 guard let strongSelf = self else { return }
                 strongSelf.isShuttingDown = true
                 strongSelf.shutdownFlag.set(true)
+                strongSelf.tearDownIOFeatures()
                 let closeMaster = strongSelf.masterFD
                 strongSelf.masterFD = -1
                 if closeMaster >= 0 {
@@ -388,15 +441,33 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
     init(shellManager: ShellManager) {
         self.shellManager = shellManager
+        let defaults = UserDefaults.standard
+        self.bracketedPasteEnabled = defaults.object(forKey: IOSettingKey.bracketed) as? Bool ?? true
+        self.mouseReportingEnabled = defaults.object(forKey: IOSettingKey.mouse) as? Bool ?? false
         super.init()
         // Initialize columns based on default width
         updateColumns()
         // Don't add prompt to output - it's shown inline in the input area
         output = ""
+        ioSettingsObserver = NotificationCenter.default.addObserver(
+            forName: .proTermIOSettingsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshIOFeatureFlags()
+        }
     }
     
+    deinit {
+        if let observer = ioSettingsObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+    
+    @MainActor
     func runCommand(_ command: String) {
-        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitized = command.sanitizedTerminalCommand()
+        let trimmed = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         // Record history of commands submitted
         commandHistory.append(trimmed)
@@ -457,7 +528,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         // Record the command in the output buffer on its own line
         // Ensure we are at a new line first, then append the command and a newline
         ensureSingleTrailingNewline()
-        output = limitOutputSize(output + "\(command)\n")
+        appendOutputChunk("\(sanitized)\n")
         
         // Handle cd command
         if trimmed.hasPrefix("cd ") {
@@ -470,8 +541,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         
         // Handle sudo command with PTY (case-insensitive)
         if trimmed.lowercased().hasPrefix("sudo") {
-            debugLog("Invoking sudo command: \(command)")
-            runSudoCommand(command)
+            debugLog("Invoking sudo command: \(sanitized)")
+            runSudoCommand(sanitized)
             return
         }
         
@@ -483,12 +554,12 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
             if !output.hasSuffix("\n") {
                 output.append("\n")
             }
-            runInteractiveCommand(command)
+            runInteractiveCommand(sanitized)
             return
         }
 
         // Handle ls command - force column output since we're not a real TTY
-        var commandToRun = command
+        var commandToRun = sanitized
         if trimmed == "ls" || trimmed.hasPrefix("ls ") {
             // Check if column formatting flags are already specified
             let hasColumnFlag = trimmed.contains(" -C") || trimmed.contains(" -x") || trimmed.contains(" -1") || 
@@ -579,15 +650,13 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
             
             guard let chunk = String(data: accumulatedData, encoding: .utf8), !chunk.isEmpty else { return }
             
-            DispatchQueue.main.async {
-                // Ensure output starts on a new line if command is still on the same line
-                var outputToAdd = chunk
-                if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
-                    // Command is still on the same line, add newline before output
-                    outputToAdd = "\n" + chunk
+                DispatchQueue.main.async {
+                    var outputToAdd = chunk
+                    if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
+                        outputToAdd = "\n" + chunk
+                    }
+                    strongSelf.appendOutputChunk(outputToAdd)
                 }
-                strongSelf.output = strongSelf.limitOutputSize(strongSelf.output + outputToAdd)
-            }
         }
 
         proc.terminationHandler = { [weak self] _ in
@@ -651,7 +720,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
                             // Command is still on the same line, add newline before output
                             finalOutputToAdd = "\n" + outputToAdd
                         }
-                        // Clean any trailing newlines from the output before appending
                         var currentOutput = strongSelf.output
                         while currentOutput.hasSuffix("\n") || currentOutput.hasSuffix("\r\n") {
                             if currentOutput.hasSuffix("\r\n") {
@@ -660,7 +728,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
                                 currentOutput = String(currentOutput.dropLast(1))
                             }
                         }
-                        strongSelf.output = strongSelf.limitOutputSize(currentOutput + finalOutputToAdd)
+                        strongSelf.output = currentOutput
+                        strongSelf.appendOutputChunk(finalOutputToAdd)
                     }
                 }
                 
@@ -705,9 +774,9 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
             // Enhanced error handling
             Task { @MainActor in
                 ErrorHandler.shared.logError(
-                    message: "Failed to execute command: \(command)",
+                    message: "Failed to execute command: \(sanitized)",
                     type: .commandExecution,
-                    command: command,
+                    command: sanitized,
                     sessionId: self.id
                 )
             }
@@ -719,8 +788,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
                 if current.hasSuffix("\r\n") { current = String(current.dropLast(2)) }
                 else { current = String(current.dropLast(1)) }
             }
-            current += "\nError: \(error.localizedDescription)\n"
-            self.output = self.limitOutputSize(current)
+            self.output = current
+            self.appendOutputChunk("\nError: \(error.localizedDescription)\n")
             // Release retained resources
             self.outputReadHandle = nil
             self.inputPipe = nil
@@ -728,6 +797,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         }
     }
     
+    @MainActor
     private func changeDirectory(to path: String) {
         guard !path.isEmpty else {
             // Empty path means cd to home directory
@@ -762,26 +832,28 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
                     sessionId: self.id
                 )
             }
-            // Error message - ensure it's on a new line
             if !self.output.hasSuffix("\n") {
-                self.output.append("\n")
+                self.appendOutputChunk("\n")
             }
-            self.output = self.limitOutputSize(self.output + "cd: \(path): No such file or directory\n")
+            self.appendOutputChunk("cd: \(path): No such file or directory\n")
         }
     }
     
     // MARK: - PTY-based command execution
     
+    @MainActor
     private func runInteractiveCommand(_ command: String) {
         // Use PTY for interactive commands via forkpty-based spawn
         runPTYCommandSimple(command)
     }
     
+    @MainActor
     private func runSudoCommand(_ command: String) {
         // Use PTY for sudo with full terminal setup (needs helper for setsid)
         runPTYCommandWithHelper(command)
     }
     
+    @MainActor
     private func runPTYCommandSimple(_ command: String) {
         do {
             let handler = try PTYWrapper(
@@ -810,14 +882,16 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
                     if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
                         outputToAdd = "\n" + text
                     }
-                    strongSelf.output = strongSelf.limitOutputSize(strongSelf.output + outputToAdd)
+                    strongSelf.appendOutputChunk(outputToAdd)
                 }
             }
+            configureIOFeaturesForActivePTY()
         } catch {
-            self.output = self.limitOutputSize(self.output + "\nError: Failed to start PTY session: \(error.localizedDescription)\n")
+            self.appendOutputChunk("\nError: Failed to start PTY session: \(error.localizedDescription)\n")
         }
     }
     
+    @MainActor
     private func runPTYCommandWithHelper(_ command: String) {
         debugLog("runPTYCommandWithHelper start: \(command)")
         let shellPath = currentShellPath()
@@ -825,7 +899,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         let pid = proterm_forkpty_spawn(shellPath, command, &master, UInt16(rows), UInt16(columns))
         guard pid > 0, master >= 0 else {
             debugLog("proterm_forkpty_spawn failed")
-            self.output = self.limitOutputSize(self.output + "\nError: Failed to start PTY session\n")
+            self.appendOutputChunk("\nError: Failed to start PTY session\n")
             return
         }
 
@@ -841,6 +915,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
         startPTYReadSource(masterFD: master)
         monitorChildProcess(pid: pid)
+        configureIOFeaturesForActivePTY()
     }
 
     private func monitorChildProcess(pid: pid_t) {
@@ -861,6 +936,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
                 self.isShuttingDown = true
                 self.shutdownFlag.set(true)
+                self.tearDownIOFeatures()
                 // Cancel read source (triggers its cancel handler) and also perform
                 // immediate, defensive cleanup here to avoid any stale state
                 // that could block the next sudo/PTY command.
@@ -928,6 +1004,15 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         }
     }
     
+    func interruptCurrentProcess() {
+        sendSignal(SIGINT)
+        process?.interrupt()
+    }
+    
+    func suspendCurrentProcess() {
+        sendSignal(SIGTSTP)
+    }
+    
     func terminate() {
         // Try graceful termination first
         sendSignal(SIGTERM)
@@ -968,8 +1053,16 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     }
     
     /// Append text to output with automatic size limiting
+    @MainActor
     func appendOutput(_ text: String) {
-        output = limitOutputSize(output + text)
+        appendOutputChunk(text)
+    }
+    
+    @MainActor
+    private func appendOutputChunk(_ chunk: String) {
+        guard !chunk.isEmpty else { return }
+        processOSCSequences(in: chunk)
+        output = limitOutputSize(output + chunk)
     }
     
     private func limitOutputSize(_ text: String) -> String {
@@ -981,9 +1074,79 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         let startIndex = text.index(text.endIndex, offsetBy: -maxOutputLength)
         return String(text[startIndex...])
     }
+    
+    @MainActor
+    private func processOSCSequences(in chunk: String) {
+        guard chunk.contains("\u{001B}]") || !oscSequenceRemainder.isEmpty else { return }
+        var combined = oscSequenceRemainder + chunk
+        oscSequenceRemainder.removeAll(keepingCapacity: true)
+        
+        while let escIndex = combined.firstIndex(of: "\u{001B}") {
+            let nextIndex = combined.index(after: escIndex)
+            guard nextIndex < combined.endIndex else {
+                oscSequenceRemainder = String(combined[escIndex...])
+                return
+            }
+            let indicator = combined[nextIndex]
+            guard indicator == "]" else {
+                combined = String(combined[combined.index(after: escIndex)...])
+                continue
+            }
+            
+            var cursor = combined.index(after: nextIndex)
+            var payload = ""
+            var terminatorFound = false
+            while cursor < combined.endIndex {
+                let symbol = combined[cursor]
+                if symbol == "\u{0007}" {
+                    terminatorFound = true
+                    break
+                } else if symbol == "\u{001B}" {
+                    let lookAhead = combined.index(after: cursor)
+                    if lookAhead < combined.endIndex && combined[lookAhead] == "\\" {
+                        terminatorFound = true
+                        cursor = lookAhead
+                        break
+                    }
+                }
+                payload.append(symbol)
+                cursor = combined.index(after: cursor)
+            }
+            
+            if !terminatorFound {
+                oscSequenceRemainder = String(combined[escIndex...])
+                return
+            }
+            
+            handleOSCCommand(payload)
+            if cursor < combined.endIndex {
+                combined = String(combined[combined.index(after: cursor)...])
+            } else {
+                combined = ""
+            }
+        }
+    }
+    
+    @MainActor
+    private func handleOSCCommand(_ payload: String) {
+        guard !payload.isEmpty else { return }
+        let components = payload.split(separator: ";", omittingEmptySubsequences: false)
+        guard let command = components.first else { return }
+        
+        switch command {
+        case "0", "2":
+            // Window title/icon label
+            let title = components.dropFirst().joined(separator: ";")
+            guard !title.isEmpty else { return }
+            NotificationCenter.default.post(name: .terminalTitleDidChange, object: id, userInfo: ["title": title])
+        default:
+            break
+        }
+    }
 }
 
 // MARK: - Notification extensions
 extension Notification.Name {
     static let directoryChanged = Notification.Name("ProTermDirectoryChanged")
+    static let terminalTitleDidChange = Notification.Name("ProTermTerminalTitleDidChange")
 }

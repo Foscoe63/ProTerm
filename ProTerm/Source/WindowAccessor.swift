@@ -40,7 +40,9 @@ struct WindowAccessor: NSViewRepresentable {
         weak var window: NSWindow?
         nonisolated(unsafe) var keyObserver: NSObjectProtocol?
         nonisolated(unsafe) var launchObserver: NSObjectProtocol?
+        nonisolated(unsafe) var visibleObserver: NSObjectProtocol?
         private var hasSetupFocus = false
+        private let focusController = CommandInputFocusController.shared
         
         deinit {
             // NotificationCenter.removeObserver is thread-safe, so we can call it from deinit
@@ -48,6 +50,9 @@ struct WindowAccessor: NSViewRepresentable {
                 NotificationCenter.default.removeObserver(observer)
             }
             if let observer = launchObserver {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            if let observer = visibleObserver {
                 NotificationCenter.default.removeObserver(observer)
             }
         }
@@ -65,6 +70,34 @@ struct WindowAccessor: NSViewRepresentable {
                     if let window = NSApplication.shared.mainWindow ?? NSApplication.shared.keyWindow {
                         self?.setupWindowFocus(window)
                     }
+                }
+            }
+            
+            // Listen for when windows become visible - ensure they become key
+            visibleObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeMainNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                // Extract window before entering Task to avoid sendable issues
+                guard let window = notification.object as? NSWindow else { return }
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          let trackedWindow = self.window,
+                          trackedWindow === window else { return }
+                    // Check visibility inside MainActor context
+                    guard window.isVisible else { return }
+                    // Ensure window becomes key when it becomes main
+                    NSApp.activate(ignoringOtherApps: true)
+                    if !window.isKeyWindow {
+                        window.makeKeyAndOrderFront(nil)
+                        window.makeKey()
+                    }
+                    // Post focus notification
+                    NotificationCenter.default.post(
+                        name: Notification.Name("ProTermFocusCommandInput"),
+                        object: nil
+                    )
                 }
             }
         }
@@ -95,7 +128,7 @@ struct WindowAccessor: NSViewRepresentable {
                 }
             }
         }
-        
+
         private func setupWindowFocus(_ window: NSWindow) {
             guard !hasSetupFocus else { return }
             hasSetupFocus = true
@@ -106,16 +139,20 @@ struct WindowAccessor: NSViewRepresentable {
             // This is what makes focus work when clicking away and back
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
+            
+            // CRITICAL: Ensure window is actually key - sometimes makeKeyAndOrderFront doesn't work immediately
+            // This is especially important when running outside Xcode
+            if !window.isKeyWindow {
+                window.makeKey()
+                // Sometimes we need to order front again after makeKey
+                window.makeKeyAndOrderFront(nil)
+            }
+            
             // Broadcast a focus request so any TerminalView that's already mounted can focus its input
             NotificationCenter.default.post(
                 name: Notification.Name("ProTermFocusCommandInput"),
                 object: nil
             )
-
-            // Ensure window is actually key - sometimes makeKeyAndOrderFront doesn't work immediately
-            if !window.isKeyWindow {
-                window.makeKey()
-            }
 
             // Immediately attempt to focus the command input once on setup to avoid races
             // where the later scheduled attempts might miss the initial mount timing.
@@ -190,28 +227,9 @@ struct WindowAccessor: NSViewRepresentable {
                 return
             }
             
-            // CRITICAL: Force window to be key - this is what clicking away and back does
-            // Without this, the text field won't accept focus even if we try to set it
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            
-            // Double-check and force if needed
-            if !window.isKeyWindow {
-                window.makeKey()
-                // Sometimes we need to order front again after makeKey
-                window.makeKeyAndOrderFront(nil)
-            }
-            
-            // Wait a tiny bit for the window to fully become key before trying to focus
-            // This mimics what happens when you click back to the app
-            if !window.isKeyWindow {
-                // Window isn't key yet - wait and retry
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
-                    self.focusCommandInput(in: window, retryCount: retryCount + 1)
-                }
-                return
-            }
+            // Never steal focus from other windows or apps; only proceed when we're active and key
+            guard NSApp.isActive else { return }
+            guard window.isKeyWindow else { return }
             
             // Recursively find CustomNSTextField or any editable NSTextField
             func findTextField(in view: NSView) -> NSTextField? {
@@ -264,14 +282,10 @@ struct WindowAccessor: NSViewRepresentable {
                 // Small delay to ensure window is fully key
                 try? await Task.sleep(nanoseconds: 30_000_000) // 0.03 seconds
                 
-                // CRITICAL: Re-check and force window to be key one more time
-                // This is what makes focus work - the window MUST be key
-                if !window.isKeyWindow {
-                    NSApp.activate(ignoringOtherApps: true)
-                    window.makeKey()
-                    window.makeKeyAndOrderFront(nil)
-                    // Wait a bit more after forcing key
-                    try? await Task.sleep(nanoseconds: 20_000_000) // 0.02 seconds
+                // Re-check: if the window lost key status, abort and retry later without stealing focus
+                guard window.isKeyWindow else {
+                    self.focusCommandInput(in: window, retryCount: retryCount + 1)
+                    return
                 }
                 
                 // Now try to make the text field first responder

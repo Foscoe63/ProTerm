@@ -10,6 +10,8 @@ struct ButtonBarView: View {
     @EnvironmentObject var advancedFeatures: AdvancedFeatures
     @EnvironmentObject var fontManager: FontManager
     @EnvironmentObject var terminalVisualSettings: TerminalVisualSettings
+    @EnvironmentObject var integrationFeatures: IntegrationFeatures
+    @EnvironmentObject var keyboardShortcutsManager: KeyboardShortcutsManager
     @EnvironmentObject var aiManager: AIManager
     @Binding var selectedTab: Int                // from ContentView
     @Binding var showQuickCommands: Bool         // from ContentView
@@ -29,6 +31,14 @@ struct ButtonBarView: View {
             ButtonGroup {
                 ToolbarButton(icon: "plus.square.on.square", help: "New Session", iconColor: .green, action: newSession)
                 ToolbarButton(icon: "xmark.square", help: "Close Current Session", iconColor: .red, action: closeCurrentSession)
+                ToolbarButton(
+                    icon: "stop.circle.fill",
+                    help: "Stop Running Command",
+                    isActive: false,
+                    iconColor: .red,
+                    isDisabled: !canStopProcess,
+                    action: stopActiveProcess
+                )
             }
             
             Divider()
@@ -114,6 +124,8 @@ struct ButtonBarView: View {
                 .environmentObject(advancedFeatures)
                 .environmentObject(fontManager)
                 .environmentObject(terminalVisualSettings)
+                .environmentObject(integrationFeatures)
+                .environmentObject(keyboardShortcutsManager)
                 .environmentObject(aiManager)
         }
         .sheet(isPresented: $showingSearchReplace) {
@@ -211,12 +223,36 @@ struct ButtonBarView: View {
         """
     }
     
+    private var activeSession: TerminalSession? {
+        guard terminalManager.sessions.indices.contains(selectedTab) else { return nil }
+        return terminalManager.sessions[selectedTab]
+    }
+    
+    private var canStopProcess: Bool {
+        guard let session = activeSession else { return false }
+        return session.isProcessRunning || session.hasActivePTY
+    }
+    
     private func pasteToInput() {
         // Delegate to the standard AppKit paste action so behavior matches right‑click Paste
         // and avoids moving potentially huge strings through notifications/state.
         NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
         ToastManager.shared.show("Pasted to input", type: .info)
     }
+
+    private func stopActiveProcess() {
+        guard let session = activeSession else {
+            ToastManager.shared.show("No active session selected", type: .warning)
+            return
+        }
+        guard session.isProcessRunning || session.hasActivePTY else {
+            ToastManager.shared.show("No running command to stop", type: .info)
+            return
+        }
+        session.interruptCurrentProcess()
+        ToastManager.shared.show("Sent interrupt signal", type: .success)
+    }
+
     
     private func clearScreen() {
         guard terminalManager.sessions.indices.contains(selectedTab) else { return }
@@ -306,6 +342,7 @@ struct SearchReplaceSheet: View {
 // MARK: - Quick Search Sheet
 struct QuickSearchSheet: View {
     @Binding var searchQuery: String
+    @State private var useRegex: Bool = false
     @Environment(\.dismiss) private var dismiss
     
     var body: some View {
@@ -317,18 +354,15 @@ struct QuickSearchSheet: View {
             TextField("Enter search term...", text: $searchQuery)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit {
-                    let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !q.isEmpty else { return }
-                    NotificationCenter.default.post(name: .searchInTerminal, object: q)
-                    dismiss()
+                    performSearch()
                 }
+            
+            Toggle("Use Regular Expression", isOn: $useRegex)
+                .help("Enable regex pattern matching")
             
             HStack {
                 Button("Search") {
-                    let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !q.isEmpty else { return }
-                    NotificationCenter.default.post(name: .searchInTerminal, object: q)
-                    dismiss()
+                    performSearch()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -340,7 +374,15 @@ struct QuickSearchSheet: View {
             }
         }
         .padding()
-        .frame(width: 400, height: 200)
+        .frame(width: 400, height: 220)
+    }
+    
+    private func performSearch() {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        NotificationCenter.default.post(name: .searchInTerminal, object: q)
+        NotificationCenter.default.post(name: .setSearchRegexMode, object: useRegex)
+        dismiss()
     }
 }
 
@@ -350,6 +392,7 @@ struct ToolbarButton: View {
     let help: String
     var isActive: Bool = false
     var iconColor: Color? = nil  // Optional custom color
+    var isDisabled: Bool = false
     let action: () -> Void
     
     @State private var isHovered = false
@@ -371,16 +414,20 @@ struct ToolbarButton: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 14, weight: .medium))
-                .foregroundColor(effectiveColor)
+                .foregroundColor(isDisabled ? .gray : effectiveColor)
                 .frame(width: 28, height: 28)
                 .background(
                     RoundedRectangle(cornerRadius: 6)
-                        .fill(isActive ? effectiveColor.opacity(0.15) : (isHovered ? effectiveColor.opacity(0.1) : Color.clear))
+                        .fill(isDisabled ? Color.clear : (isActive ? effectiveColor.opacity(0.15) : (isHovered ? effectiveColor.opacity(0.1) : Color.clear)))
                 )
         }
         .buttonStyle(.plain)
         .help(help)
+        .accessibilityLabel(help)
+        .accessibilityHint(isDisabled ? "This action is currently disabled" : "Activate to \(help.lowercased())")
+        .disabled(isDisabled)
         .onHover { hovering in
+            guard !isDisabled else { return }
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovered = hovering
             }
@@ -418,4 +465,5 @@ extension Notification.Name {
     static let showSystemInfo = Notification.Name("ProTermShowSystemInfo")
     static let quickSearch = Notification.Name("ProTermQuickSearch")
     static let copySelectedText = Notification.Name("ProTermCopySelectedText")
+    static let setSearchRegexMode = Notification.Name("ProTermSetSearchRegexMode")
 }

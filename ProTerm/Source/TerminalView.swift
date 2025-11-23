@@ -18,6 +18,7 @@ struct TerminalView: View {
     @FocusState private var passwordFieldIsFocused: Bool    // ← focus‑state for password field
     @State private var hasRequestedInitialFocus = false     // Track if we've set initial focus
     @State private var cachedAttributedOutput: AttributedString = AttributedString("")
+    @State private var hasPendingBracketedPaste = false
     
     @EnvironmentObject private var lineNumbersManager: LineNumbersManager
     @EnvironmentObject private var themeManager: ThemeManager
@@ -26,6 +27,16 @@ struct TerminalView: View {
     @EnvironmentObject private var productivityTools: ProductivityTools
     @EnvironmentObject private var terminalManager: TerminalManager
     @EnvironmentObject private var visualSettings: TerminalVisualSettings
+    
+    private var activeProfile: AppearanceProfile { themeManager.activeProfile }
+    private var mouseReportingActive: Bool {
+        visualSettings.enableMouseReporting && session.hasActivePTY
+    }
+    private var pointerCellSize: CGSize {
+        fontManager.characterCellSize
+    }
+
+    private var focusController: CommandInputFocusController { CommandInputFocusController.shared }
 
     // History UI state
     @State private var showingHistorySheet: Bool = false
@@ -45,16 +56,23 @@ struct TerminalView: View {
 
     // Submit command helper (used by both onCommit and onSubmit)
     private func submitCommand() {
-        let cmd = commandInput
-        let trimmed = cmd.trimmingCharacters(in: .whitespacesAndNewlines)
+        let originalInput = commandInput
+        let sanitizedInput = originalInput.sanitizedTerminalCommand()
+        if sanitizedInput != originalInput {
+            commandInput = sanitizedInput
+        }
+        let trimmed = sanitizedInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { 
             // Clear input even if empty
             commandInput = ""
             // Still restore focus even for empty commands
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                commandFieldIsFocused = true
-                // Also broadcast a focus request to ensure AppKit first responder is set
-                NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                Task { @MainActor in
+                    commandFieldIsFocused = true
+                    requestControllerFocus(reason: .manual)
+                    // Also broadcast a focus request to ensure AppKit first responder is set
+                    NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                }
             }
             return 
         }
@@ -64,8 +82,11 @@ struct TerminalView: View {
         guard !session.isProcessRunning || session.hasActivePTY else { 
             // Restore focus even if command can't run
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                commandFieldIsFocused = true
-                NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                Task { @MainActor in
+                    commandFieldIsFocused = true
+                    requestControllerFocus(reason: .manual)
+                    NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                }
             }
             return 
         }
@@ -78,15 +99,22 @@ struct TerminalView: View {
         var expandedCommand = advancedFeatures.expandAlias(trimmed)
         expandedCommand = expandBookmarkInCommand(expandedCommand)
         session.runCommand(expandedCommand)
+        hasPendingBracketedPaste = false
         // Return focus to the field after running (with delay to ensure view has updated)
         // Use a longer delay to ensure all output updates have completed
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            commandFieldIsFocused = true
-            NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+            Task { @MainActor in
+                commandFieldIsFocused = true
+                requestControllerFocus(reason: .manual)
+                NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+            }
             // Also try again after a bit more time in case output is still updating
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-        commandFieldIsFocused = true
-                NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                Task { @MainActor in
+                    commandFieldIsFocused = true
+                    requestControllerFocus(reason: .manual)
+                    NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                }
             }
         }
     }
@@ -109,6 +137,7 @@ struct TerminalView: View {
     var body: some View {
         terminalOutputArea
         .onAppear {
+            requestControllerFocus(reason: .viewAppeared)
             // CRITICAL: Request initial focus immediately
             if !hasRequestedInitialFocus {
                 hasRequestedInitialFocus = true
@@ -116,17 +145,25 @@ struct TerminalView: View {
             }
             
             // Start attempting focus immediately and with retries
-            forceFocus()
+            forceFocus(reason: .startup, allowActivation: true)
             
             // Retry sequence to handle window activation delays
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 100_000_000) // 0.1s
-                forceFocus()
+                forceFocus(reason: .startup, allowActivation: true)
                 try? await Task.sleep(nanoseconds: 400_000_000) // 0.5s
-                forceFocus()
+                forceFocus(reason: .startup, allowActivation: true)
                 try? await Task.sleep(nanoseconds: 500_000_000) // 1.0s
-                forceFocus()
+                forceFocus(reason: .startup, allowActivation: true)
             }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard hasRequestedInitialFocus else { return }
+                forceFocus(reason: .startup, allowActivation: true)
+            }
+        }
+        .onDisappear {
+            focusController.clearActiveSession(session.id)
         }
         .background(WindowAccessor()) // Add WindowAccessor for robust window-level focus handling
         // Listen for window becoming key to set focus - this is the most reliable trigger
@@ -137,7 +174,7 @@ struct TerminalView: View {
                let myWindow = NSApplication.shared.mainWindow ?? NSApplication.shared.keyWindow,
                window === myWindow {
                 // Use forceFocus to ensure all focus mechanisms are triggered
-                forceFocus()
+                forceFocus(reason: .windowBecameKey)
             }
         }
         // (Removed early, duplicate focus listener. Focus is handled below with target filtering.)
@@ -158,6 +195,13 @@ struct TerminalView: View {
         .onReceive(NotificationCenter.default.publisher(for: .searchInTerminal)) { notification in
             if let query = notification.object as? String {
                 searchQuery = query
+                updateCachedAttributedOutput()
+            }
+        }
+        // Listen for regex mode toggle
+        .onReceive(NotificationCenter.default.publisher(for: .setSearchRegexMode)) { notification in
+            if let useRegexValue = notification.object as? Bool {
+                useRegex = useRegexValue
                 updateCachedAttributedOutput()
             }
         }
@@ -219,20 +263,9 @@ struct TerminalView: View {
             }
             
             if shouldFocus {
-                // Simple and direct - just set focus immediately
-                DispatchQueue.main.async {
-                    // If a password prompt is visible, do NOT steal focus for the command field
+                Task { @MainActor in
                     guard !self.showPasswordInput else { return }
-                    NSApp.activate(ignoringOtherApps: true)
-                    let window = NSApplication.shared.mainWindow
-                        ?? NSApplication.shared.keyWindow
-                        ?? NSApp.windows.first
-                    window?.makeKeyAndOrderFront(nil)
-                    self.commandFieldIsFocused = true
-                    // Also try to focus directly via AppKit
-                    if let window = window, let contentView = window.contentView {
-                        self.focusCommandFieldInView(contentView)
-                    }
+                    forceFocus(reason: .notification)
                 }
             }
         }
@@ -290,67 +323,158 @@ struct TerminalView: View {
     // MARK: - Terminal Output Area
     
     private var terminalOutputArea: some View {
-        let backgroundColor = themeManager.current.background
-        
-        return GeometryReader { geo in
-                ZStack {
-                    // Background
-                    backgroundColor
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    // Output + line numbers
-                    HStack(alignment: .top, spacing: 0) {
-                        scrollContent(geo: geo)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onTapGesture { /* bullet‑proof – do nothing */ }
-                .onAppear {
-                    // Update terminal width when view appears
-                    let lineNumbersWidth = lineNumbersManager.showLineNumbers ? 60.0 : 0.0
-                    session.terminalWidth = geo.size.width - lineNumbersWidth
-                }
-                .onChange(of: geo.size.width) { _, newWidth in
-                    // Update terminal width when view resizes
-                    let lineNumbersWidth = lineNumbersManager.showLineNumbers ? 60.0 : 0.0
-                    session.terminalWidth = newWidth - lineNumbersWidth
-                }
-                .onChange(of: lineNumbersManager.showLineNumbers) { _, _ in
-                    // Update terminal width when line numbers toggle
-                    let lineNumbersWidth = lineNumbersManager.showLineNumbers ? 60.0 : 0.0
-                    session.terminalWidth = geo.size.width - lineNumbersWidth
+        GeometryReader { geo in
+            let appearance = activeProfile
+            let horizontalPadding = CGFloat(appearance.horizontalPadding)
+            let verticalPadding = CGFloat(appearance.verticalPadding)
+            let lineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+            let availableWidth = max(40, geo.size.width - horizontalPadding * 2)
+            
+            ZStack {
+                HStack(alignment: .top, spacing: 0) {
+                    scrollContent(geo: geo, availableWidth: availableWidth)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
+            .background(
+                terminalBackground(for: appearance)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: appearance.cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: appearance.cornerRadius, style: .continuous)
+                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.18), radius: 18, y: 10)
+            .overlay {
+                if mouseReportingActive {
+                    let insets = EdgeInsets(
+                        top: verticalPadding,
+                        leading: horizontalPadding + (lineNumbersManager.showLineNumbers ? 60 : 0),
+                        bottom: verticalPadding,
+                        trailing: horizontalPadding
+                    )
+                    MouseReportingOverlay(
+                        isEnabled: true,
+                        cellSize: pointerCellSize,
+                        contentInsets: insets,
+                        sendSequence: { sequence in
+                            session.sendInput(sequence)
+                        }
+                    )
+                }
+            }
+            .onTapGesture { }
+            .onAppear {
+                recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: lineNumbersWidth)
+            }
+            .onChange(of: geo.size.width) { _, newWidth in
+                recalculateTerminalWidth(totalWidth: newWidth, lineNumberWidth: lineNumbersWidth)
+            }
+            .onChange(of: lineNumbersManager.showLineNumbers) { _, _ in
+                let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+                recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+            }
+            .onChange(of: themeManager.activeProfileID) { _, _ in
+                let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+                recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+            }
+            .onChange(of: themeManager.activeProfile.horizontalPadding) { _, _ in
+                let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+                recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func terminalBackground(for profile: AppearanceProfile) -> some View {
+        let baseColor = themeManager.current.background.opacity(profile.backgroundOpacity)
+        if let material = profile.backgroundMaterial.material {
+            RoundedRectangle(cornerRadius: profile.cornerRadius, style: .continuous)
+                .fill(material)
+                .background(
+                    RoundedRectangle(cornerRadius: profile.cornerRadius, style: .continuous)
+                        .fill(baseColor)
+                )
+        } else {
+            RoundedRectangle(cornerRadius: profile.cornerRadius, style: .continuous)
+                .fill(baseColor)
+        }
+    }
+    
+    private func recalculateTerminalWidth(totalWidth: CGFloat, lineNumberWidth: CGFloat) {
+        let padding = CGFloat(themeManager.activeProfile.horizontalPadding * 2)
+        let width = max(40, totalWidth - lineNumberWidth - padding)
+        session.terminalWidth = width
     }
     
     // MARK: - Scroll Content
     
     @ViewBuilder
-    private func scrollContent(geo: GeometryProxy) -> some View {
+    private func scrollContent(geo: GeometryProxy, availableWidth: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ZStack(alignment: .topTrailing) {
-                scrollViewContent(geo: geo, proxy: proxy)
+                scrollViewContent(geo: geo, proxy: proxy, availableWidth: availableWidth)
                 processIndicatorOverlay
+            }
+            .onAppear {
+                // Restore scroll position when view appears
+                if let savedPosition = terminalManager.scrollPositions[session.id] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        // Use a calculated anchor based on saved position
+                        // Since we can't directly set scroll offset, we'll scroll to a calculated position
+                        // For now, if position is near bottom (>= 0.9), scroll to bottom
+                        // Otherwise, try to maintain relative position
+                        if savedPosition >= 0.9 {
+                            proxy.scrollTo("BOTTOM", anchor: .bottom)
+                        } else {
+                            // Try to scroll to a position that approximates the saved ratio
+                            // This is a simplified approach - full implementation would require tracking line IDs
+                            proxy.scrollTo("BOTTOM", anchor: UnitPoint(x: 0.5, y: savedPosition))
+                        }
+                    }
+                }
+            }
+            .onDisappear {
+                // Save current scroll position (simplified - would need actual scroll offset)
+                // For now, we'll save a flag that user was not at bottom
+                // Full implementation would require ScrollViewReader with offset tracking
             }
         }
     }
     
     @ViewBuilder
-    private func scrollViewContent(geo: GeometryProxy, proxy: ScrollViewProxy) -> some View {
+    private func scrollViewContent(geo: GeometryProxy, proxy: ScrollViewProxy, availableWidth: CGFloat) -> some View {
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 0) {
-                outputLineWithNumbers
-                commandInputArea
-                Color.clear.frame(height: 1).id("BOTTOM")
+            Group {
+                if shouldUseVirtualScrolling {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        virtualScrolledOutput
+                        commandInputArea
+                        Color.clear.frame(height: 1).id("BOTTOM")
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        outputLineWithNumbers
+                        commandInputArea
+                        Color.clear.frame(height: 1).id("BOTTOM")
+                    }
+                }
             }
         }
         .scrollIndicators(.visible)
         .onChange(of: session.output) { _, _ in
             updateCachedAttributedOutput()
-            DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo("BOTTOM", anchor: .bottom)
+            // Only auto-scroll if user was at bottom or if visualSettings.autoScroll is enabled
+            let wasAtBottom = terminalManager.scrollPositions[session.id] ?? 1.0 >= 0.9
+            if visualSettings.autoScroll || wasAtBottom {
+                DispatchQueue.main.async {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo("BOTTOM", anchor: .bottom)
+                    }
                 }
+                terminalManager.scrollPositions[session.id] = 1.0
             }
         }
         .onChange(of: commandFieldIsFocused) { _, isFocused in
@@ -382,12 +506,18 @@ struct TerminalView: View {
         }
         .onAppear {
             updateCachedAttributedOutput()
+            // Initialize scroll position tracking
+            if terminalManager.scrollPositions[session.id] == nil {
+                terminalManager.scrollPositions[session.id] = 1.0
+            }
             DispatchQueue.main.async {
+                // Always start at bottom on appear (user can scroll if needed)
                 proxy.scrollTo("BOTTOM", anchor: .bottom)
                 commandFieldIsFocused = true
             }
         }
-        .frame(width: geo.size.width, height: geo.size.height)
+        .background(ScrollPositionTracker(sessionId: session.id, terminalManager: terminalManager))
+        .frame(width: availableWidth, height: geo.size.height)
         .clipped()
     }
     
@@ -398,7 +528,7 @@ struct TerminalView: View {
                 LineNumbersView(attributedText: highlightedAttributedOutput, font: fontManager.font)
                     .font(fontManager.font)
                     .foregroundColor(.gray)
-                    .frame(width: 43, alignment: .trailing)
+                    .frame(width: 23, alignment: .trailing)
                     .padding(.trailing, 6)
                     .padding(.vertical, 4)
             }
@@ -422,7 +552,7 @@ struct TerminalView: View {
                 Text("\(calculateCommandInputLineNumber())")
                     .font(fontManager.font)
                     .foregroundColor(.gray)
-                    .frame(width: 43, alignment: .trailing)
+                    .frame(width: 23, alignment: .trailing)
                     .padding(.trailing, 6)
                     .padding(.vertical, 4)
             }
@@ -433,6 +563,8 @@ struct TerminalView: View {
                 
                 SecureField("Enter password", text: $passwordInput)
                     .focused($passwordFieldIsFocused)
+                    .accessibilityLabel("Password input field")
+                    .accessibilityHint("Enter your password for sudo commands")
                     .onSubmit {
                         let password = passwordInput
                         passwordInput = ""
@@ -465,7 +597,7 @@ struct TerminalView: View {
                 Text("\(calculateCommandInputLineNumber())")
                     .font(fontManager.font)
                     .foregroundColor(.gray)
-                    .frame(width: 43, alignment: .trailing)
+                    .frame(width: 23, alignment: .trailing)
                     .padding(.trailing, 6)
                     .padding(.vertical, 4)
             }
@@ -477,20 +609,26 @@ struct TerminalView: View {
                 
                 CustomTextField(
                     text: $commandInput,
-                    placeholder: "",
+                    placeholder: "Enter command",
                     font: NSFont(name: fontManager.fontName, size: fontManager.fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontManager.fontSize, weight: .regular),
                     textColor: NSColor(themeManager.current.foreground),
                     cursorStyle: visualSettings.cursorStyle,
                     cursorBlinking: visualSettings.cursorBlinking,
+                    cursorColor: NSColor(themeManager.current.cursor),
                     onSubmit: {
                         let cmd = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
                         let activePTY = session.hasActivePTY
                         if activePTY {
-                            session.sendInput(commandInput + "\n")
+                            let payload = preparePTYInputPayload(from: commandInput)
+                            session.sendInput(payload + "\n")
                             commandInput = ""
+                            hasPendingBracketedPaste = false
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                commandFieldIsFocused = true
-                                NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                                Task { @MainActor in
+                                    commandFieldIsFocused = true
+                                    requestControllerFocus(reason: .manual)
+                                    NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                                }
                             }
                         } else if !cmd.isEmpty {
                             submitCommand()
@@ -513,10 +651,23 @@ struct TerminalView: View {
                     isFocused: Binding(
                         get: { commandFieldIsFocused },
                         set: { commandFieldIsFocused = $0 }
-                    )
+                    ),
+                    sessionID: session.id
                 )
                 .id("\(visualSettings.cursorStyle.rawValue)-\(visualSettings.cursorBlinking)")
                 .disabled(false)
+                .accessibilityLabel("Command input field")
+                .accessibilityHint("Type commands here. Press Return to execute.")
+                .padding(.horizontal, visualSettings.showCommandBoxOutline ? 4 : 0)
+                .padding(.vertical, visualSettings.showCommandBoxOutline ? 2 : 0)
+            .overlay(
+                Group {
+                    if visualSettings.showCommandBoxOutline {
+                        RoundedRectangle(cornerRadius: visualSettings.commandBoxOutlineCornerRadius)
+                            .stroke(visualSettings.commandBoxOutlineColor, lineWidth: visualSettings.commandBoxOutlineWidth)
+                    }
+                }
+            )
                 .onChange(of: commandInput) { oldValue, newValue in
                     if newValue != lastCompletionInput {
                         currentCompletions = []
@@ -525,6 +676,9 @@ struct TerminalView: View {
                     if !newValue.isEmpty && historyIndex >= 0 {
                         historyIndex = -1
                         historySearchInput = ""
+                    }
+                    if newValue.isEmpty {
+                        hasPendingBracketedPaste = false
                     }
                 }
             }
@@ -535,30 +689,25 @@ struct TerminalView: View {
         }
         .id("command-input")
         .onAppear {
-            NSApp.activate(ignoringOtherApps: true)
-            let window = NSApplication.shared.mainWindow
-                ?? NSApplication.shared.keyWindow
-                ?? NSApp.windows.first
-            window?.makeKeyAndOrderFront(nil)
-            commandFieldIsFocused = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                NSApp.activate(ignoringOtherApps: true)
-                let window = NSApplication.shared.mainWindow
-                    ?? NSApplication.shared.keyWindow
-                    ?? NSApp.windows.first
-                window?.makeKeyAndOrderFront(nil)
-                commandFieldIsFocused = true
+            Task { @MainActor in
+                forceFocus(reason: .viewAppeared)
             }
         }
         .onChange(of: session.isProcessRunning) { oldValue, newValue in
             if oldValue == true && newValue == false {
                 commandInput = ""
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    commandFieldIsFocused = true
-                    NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    Task { @MainActor in
                         commandFieldIsFocused = true
+                        requestControllerFocus(reason: .manual)
                         NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        Task { @MainActor in
+                            commandFieldIsFocused = true
+                            requestControllerFocus(reason: .manual)
+                            NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                        }
                     }
                 }
             }
@@ -567,7 +716,10 @@ struct TerminalView: View {
             if !session.isProcessRunning && commandFieldIsFocused {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     if !session.isProcessRunning && commandFieldIsFocused {
-                        commandFieldIsFocused = true
+                        Task { @MainActor in
+                            commandFieldIsFocused = true
+                            requestControllerFocus(reason: .manual)
+                        }
                     }
                 }
             }
@@ -654,13 +806,18 @@ struct TerminalView: View {
                         textColor: NSColor(themeManager.current.foreground),
                         cursorStyle: visualSettings.cursorStyle,
                         cursorBlinking: visualSettings.cursorBlinking,
+                        cursorColor: NSColor(themeManager.current.cursor),
                         onSubmit: {
                             // Capture the command before clearing
                             let cmd = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
                             
                             // If we have an active PTY (interactive process), send input to it
                             if session.hasActivePTY {
-                                session.sendInput(commandInput + "\n")
+                                let sanitizedInput = commandInput.sanitizedTerminalCommand()
+                                if sanitizedInput != commandInput {
+                                    commandInput = sanitizedInput
+                                }
+                                session.sendInput(sanitizedInput + "\n")
                                 commandInput = ""
                                 // Restore focus after a delay to ensure view has updated
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
@@ -693,7 +850,8 @@ struct TerminalView: View {
                         isFocused: Binding(
                             get: { commandFieldIsFocused },
                             set: { commandFieldIsFocused = $0 }
-                        )
+                        ),
+                        sessionID: session.id
                     )
                     // Force view refresh when cursor style or blinking changes
                     .id("\(visualSettings.cursorStyle.rawValue)-\(visualSettings.cursorBlinking)")
@@ -720,7 +878,7 @@ struct TerminalView: View {
                                     window.makeKeyAndOrderFront(nil)
                                     // Also try direct AppKit focus via the focus helper
                                     if let contentView = window.contentView {
-                                        self.focusCommandFieldInView(contentView)
+                                        self.focusCommandFieldInView(contentView, allowActivation: true)
                                     }
                                     // Post notification to trigger focus as well
                                     NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
@@ -794,6 +952,8 @@ struct TerminalView: View {
             .font(fontManager.font)
             .foregroundColor(themeManager.current.foreground)
             .id("output-\(session.id.uuidString)") // Ensure output is tied to this session
+            .accessibilityLabel("Terminal output")
+            .accessibilityHint("Command output and terminal text. Use search to find specific content.")
     }
 
     // MARK: - ANSI‑parsed Output with Search Highlights
@@ -804,34 +964,99 @@ struct TerminalView: View {
         return cachedAttributedOutput
     }
     
+    // Check if we should use virtual scrolling (for large outputs)
+    private var shouldUseVirtualScrolling: Bool {
+        let outputLines = session.output.components(separatedBy: .newlines).count
+        return outputLines > 10000
+    }
+    
+    // Virtual scrolled output - splits into lines for LazyVStack
+    @ViewBuilder
+    private var virtualScrolledOutput: some View {
+        let lines = splitOutputIntoLines()
+        ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                if lineNumbersManager.showLineNumbers {
+                    Text("\(index + 1)")
+                        .font(fontManager.font)
+                        .foregroundColor(.gray)
+                        .frame(width: 23, alignment: .trailing)
+                        .padding(.trailing, 6)
+                        .padding(.vertical, 4)
+                }
+                Text(line)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, lineNumbersManager.showLineNumbers ? 0 : 10)
+                    .padding(.trailing, 10)
+                    .padding(.vertical, 4)
+                    .font(fontManager.font)
+                    .foregroundColor(themeManager.current.foreground)
+            }
+            .id("line-\(index)")
+        }
+    }
+    
+    // Split output into individual lines for virtual scrolling
+    private func splitOutputIntoLines() -> [AttributedString] {
+        let fullOutput = highlightedAttributedOutput
+        let string = String(fullOutput.characters)
+        let lines = string.components(separatedBy: .newlines)
+        
+        // Convert back to AttributedString lines (simplified - preserves basic formatting)
+        return lines.map { line in
+            // Try to preserve attributes from original if possible
+            // For now, create simple attributed strings
+            var attributed = AttributedString(line)
+            // Apply search highlighting if needed
+            if !searchQuery.isEmpty {
+                let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+                if useRegex {
+                    if let range = attributed.range(of: q, options: .regularExpression) {
+                        attributed[range].backgroundColor = Color.yellow.opacity(0.35)
+                    }
+                } else {
+                    if let range = attributed.range(of: q, options: .caseInsensitive) {
+                        attributed[range].backgroundColor = Color.yellow.opacity(0.35)
+                    }
+                }
+            }
+            return attributed
+        }
+    }
+    
+    @MainActor
+    private func requestControllerFocus(reason: CommandInputFocusController.FocusReason) {
+        focusController.setActiveSession(session.id)
+        focusController.requestFocus(for: session.id, reason: reason)
+    }
+
     // Helper to forcefully set focus
     @MainActor
-    private func forceFocus() {
-        // 1. Activate the app
-        NSApp.activate(ignoringOtherApps: true)
-        
-        // 2. Find the window
-        let window = NSApplication.shared.mainWindow 
-            ?? NSApplication.shared.keyWindow 
+    private func forceFocus(reason: CommandInputFocusController.FocusReason = .manual, allowActivation: Bool = false) {
+        requestControllerFocus(reason: reason)
+        let window = NSApplication.shared.mainWindow
+            ?? NSApplication.shared.keyWindow
             ?? NSApp.windows.first
-            
-        if let window = window {
-            // 3. Make window key and visible
+
+        guard let window else { return }
+
+        if allowActivation {
+            NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
-            
-            // 4. Set SwiftUI focus state
-            self.commandFieldIsFocused = true
-            
-            // 5. Direct AppKit focus (most reliable)
-            if let contentView = window.contentView {
-                self.focusCommandFieldInView(contentView)
-            }
+        } else {
+            guard NSApp.isActive, window.isKeyWindow else { return }
+        }
+
+        self.commandFieldIsFocused = true
+
+        if let contentView = window.contentView {
+            self.focusCommandFieldInView(contentView, allowActivation: allowActivation)
         }
     }
 
     // Helper to find and focus the command field directly via AppKit
     @MainActor
-    private func focusCommandFieldInView(_ view: NSView) {
+    private func focusCommandFieldInView(_ view: NSView, allowActivation: Bool) {
         // Find the editable NSTextField (command input)
         guard let textField = findTextField(in: view) else { return }
         // Ensure the text field is attached to a window and that window matches the container's window
@@ -842,30 +1067,35 @@ struct TerminalView: View {
             return
         }
         tfWindow.initialFirstResponder = textField
-        NSApp.activate(ignoringOtherApps: true)
-        tfWindow.makeKeyAndOrderFront(nil)
-        DispatchQueue.main.async {
-            if tfWindow.makeFirstResponder(textField), let editor = textField.currentEditor() {
-                tfWindow.makeFirstResponder(editor)
-            }
+        if allowActivation {
+            NSApp.activate(ignoringOtherApps: true)
+            tfWindow.makeKeyAndOrderFront(nil)
+        } else {
+            guard NSApp.isActive, tfWindow.isKeyWindow else { return }
+        }
+        // Since we're already @MainActor, execute directly without DispatchQueue
+        if tfWindow.makeFirstResponder(textField), let editor = textField.currentEditor() {
+            tfWindow.makeFirstResponder(editor)
         }
     }
 
     // Helper to find and focus the password field directly via AppKit
     @MainActor
-    private func focusPasswordFieldInView(_ view: NSView) {
+    private func focusPasswordFieldInView(_ view: NSView, allowActivation: Bool = true) {
         guard let pwdField = findSecureTextField(in: view) else { return }
         guard let tfWindow = pwdField.window else { return }
         guard let containerWindow = view.window ?? NSApplication.shared.keyWindow ?? NSApplication.shared.mainWindow else { return }
         guard tfWindow === containerWindow else { return }
         tfWindow.initialFirstResponder = pwdField
-        NSApp.activate(ignoringOtherApps: true)
-        tfWindow.makeKeyAndOrderFront(nil)
-        DispatchQueue.main.async {
-            _ = tfWindow.makeFirstResponder(pwdField)
-            if let editor = pwdField.currentEditor() {
-                tfWindow.makeFirstResponder(editor)
-            }
+        if allowActivation {
+            NSApp.activate(ignoringOtherApps: true)
+            tfWindow.makeKeyAndOrderFront(nil)
+        } else {
+            guard NSApp.isActive, tfWindow.isKeyWindow else { return }
+        }
+        // Since we're already @MainActor, execute directly without DispatchQueue
+        if tfWindow.makeFirstResponder(pwdField), let editor = pwdField.currentEditor() {
+            tfWindow.makeFirstResponder(editor)
         }
     }
     
@@ -1099,7 +1329,17 @@ struct TerminalView: View {
         } else {
             commandInput += paste
         }
+        if visualSettings.enableBracketedPaste {
+            hasPendingBracketedPaste = true
+        }
         commandFieldIsFocused = true
+    }
+    
+    private func preparePTYInputPayload(from text: String) -> String {
+        guard visualSettings.enableBracketedPaste, hasPendingBracketedPaste else {
+            return text
+        }
+        return "\u{001B}[200~\(text)\u{001B}[201~"
     }
 
     @MainActor
@@ -1569,6 +1809,24 @@ struct LineCountPreferenceKey: PreferenceKey {
     static let defaultValue: Int = 0
     static func reduce(value: inout Int, nextValue: () -> Int) {
         value = nextValue()
+    }
+}
+
+// MARK: - Scroll Position Tracking
+// Simplified scroll position tracking - saves whether user was at bottom
+// Full position restoration would require more complex ScrollView offset tracking
+struct ScrollPositionTracker: View {
+    let sessionId: UUID
+    @ObservedObject var terminalManager: TerminalManager
+    
+    var body: some View {
+        Color.clear
+            .onAppear {
+                // Initialize scroll position to bottom if not set
+                if terminalManager.scrollPositions[sessionId] == nil {
+                    terminalManager.scrollPositions[sessionId] = 1.0
+                }
+            }
     }
 }
 

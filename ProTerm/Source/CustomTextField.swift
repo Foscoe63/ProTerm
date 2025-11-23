@@ -7,6 +7,7 @@ typealias NSViewDrawFunc = @convention(c) (AnyObject, Selector, NSRect) -> Void
 
 nonisolated(unsafe) private var cursorStyleKey: UInt8 = 0
 nonisolated(unsafe) private var cursorBlinkingKey: UInt8 = 1
+nonisolated(unsafe) private var cursorColorKey: UInt8 = 2
 
 // Custom window that provides a custom field editor
 class CustomFieldEditorWindow: NSWindow {
@@ -67,17 +68,20 @@ struct CustomTextField: NSViewRepresentable {
     var textColor: NSColor
     var cursorStyle: TerminalVisualSettings.CursorStyle
     var cursorBlinking: Bool
+    var cursorColor: NSColor
     var onSubmit: () -> Void
     var onTab: (() -> Bool)?
     var onUpArrow: (() -> Bool)?
     var onDownArrow: (() -> Bool)?
     var isFocused: Binding<Bool>
+    var sessionID: UUID
     
     func makeNSView(context: Context) -> NSTextField {
         // Initialize swizzling for cursor styles (only once)
         NSTextView.swizzleDrawInsertionPoint()
         
         let textField = CustomNSTextField()
+        textField.sessionID = sessionID
         textField.delegate = context.coordinator
         textField.placeholderString = placeholder
         textField.stringValue = text  // Set initial text value
@@ -90,12 +94,18 @@ struct CustomTextField: NSViewRepresentable {
         textField.isEditable = true
         textField.isEnabled = true
         textField.isSelectable = true
-        // Remove any cell padding/insets
+        // Set accessibility properties
+        textField.setAccessibilityLabel(placeholder.isEmpty ? "Command input" : placeholder)
+        textField.setAccessibilityRole(.textField)
+        // Remove any cell padding/insets and disable focus ring
         if let cell = textField.cell as? NSTextFieldCell {
             cell.lineBreakMode = .byCharWrapping
+            cell.focusRingType = .none
         }
         textField.cursorStyle = cursorStyle
         textField.cursorBlinking = cursorBlinking
+        textField.cursorColor = cursorColor
+        textField.cursorColor = cursorColor
         textField.onSubmit = onSubmit
         textField.onTab = onTab
         textField.onUpArrow = onUpArrow
@@ -134,6 +144,11 @@ struct CustomTextField: NSViewRepresentable {
         nsView.isEditable = true
         nsView.isEnabled = true
         nsView.isSelectable = true
+        
+        // Always disable focus ring to prevent default AppKit outline
+        nsView.focusRingType = .none
+        nsView.isBordered = false
+        nsView.isBezeled = false
         
         // Update text if different
         // Check if there's an active field editor
@@ -192,6 +207,11 @@ struct CustomTextField: NSViewRepresentable {
         nsView.font = font
         nsView.textColor = textColor
         
+        // Ensure cell also has focus ring disabled
+        if let cell = nsView.cell as? NSTextFieldCell {
+            cell.focusRingType = .none
+        }
+        
         if let customField = nsView as? CustomNSTextField {
             // ALWAYS update cursor style and blinking (even if same value)
             // This ensures changes from preferences take effect immediately
@@ -200,6 +220,7 @@ struct CustomTextField: NSViewRepresentable {
             
             customField.cursorStyle = cursorStyle
             customField.cursorBlinking = cursorBlinking
+            customField.cursorColor = cursorColor
             customField.onSubmit = onSubmit
             customField.onTab = onTab
             customField.onUpArrow = onUpArrow
@@ -215,6 +236,8 @@ struct CustomTextField: NSViewRepresentable {
                         let _ = editor.layoutManager
                         objc_setAssociatedObject(editor, &cursorStyleKey, cursorStyle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
                         objc_setAssociatedObject(editor, &cursorBlinkingKey, cursorBlinking, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                        objc_setAssociatedObject(editor, &cursorColorKey, cursorColor, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                        editor.insertionPointColor = cursorColor
                         // Force cursor to redraw by invalidating and restarting
                         editor.updateInsertionPointStateAndRestartTimer(true)
                         editor.needsDisplay = true
@@ -228,6 +251,8 @@ struct CustomTextField: NSViewRepresentable {
                         let _ = editor.layoutManager
                         objc_setAssociatedObject(editor, &cursorStyleKey, cursorStyle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
                         objc_setAssociatedObject(editor, &cursorBlinkingKey, cursorBlinking, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                        objc_setAssociatedObject(editor, &cursorColorKey, cursorColor, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                        editor.insertionPointColor = cursorColor
                         editor.updateInsertionPointStateAndRestartTimer(true)
                         editor.needsDisplay = true
                         // Force immediate redraw
@@ -246,6 +271,8 @@ struct CustomTextField: NSViewRepresentable {
                        let editor = window.fieldEditor(false, for: nsView) as? NSTextView {
                         objc_setAssociatedObject(editor, &cursorStyleKey, cursorStyle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
                         objc_setAssociatedObject(editor, &cursorBlinkingKey, cursorBlinking, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                        objc_setAssociatedObject(editor, &cursorColorKey, cursorColor, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+                        editor.insertionPointColor = cursorColor
                     }
                 }
             }
@@ -360,6 +387,19 @@ private var cursorBlinkingStorage: [NSTextField: Bool] = [:]
 
 /// Custom NSTextField that supports different cursor styles
 class CustomNSTextField: NSTextField {
+    var sessionID: UUID? {
+        didSet {
+            let previousID = oldValue
+            let identifier = ObjectIdentifier(self)
+            Task { @MainActor [weak self] in
+                if let previousID {
+                    CommandInputFocusController.shared.unregister(sessionID: previousID, identifier: identifier)
+                }
+                self?.registerIfPossible()
+            }
+        }
+    }
+    
     override func mouseDown(with event: NSEvent) {
         // Ensure we become first responder when clicked
         if let window = self.window {
@@ -377,6 +417,16 @@ class CustomNSTextField: NSTextField {
         hasAutoFocusedOnAttach = false
         if autoFocusOnAttach {
             scheduleAutoFocus()
+        }
+        let identifier = ObjectIdentifier(self)
+        let currentSessionID = sessionID
+        Task { @MainActor [weak self] in
+            if let self, self.window != nil {
+                self.registerIfPossible()
+                self.window?.initialFirstResponder = self
+            } else if let sessionID = currentSessionID {
+                CommandInputFocusController.shared.unregister(sessionID: sessionID, identifier: identifier)
+            }
         }
     }
     
@@ -425,27 +475,32 @@ class CustomNSTextField: NSTextField {
     
     /// Force this text field to become first responder
     @MainActor
-    func forceBecomeFirstResponder() {
+    func forceBecomeFirstResponder(allowActivation: Bool = true) {
         guard let window = self.window else { return }
         
-        // Make sure the window is key and visible
-        if !window.isKeyWindow {
-            window.makeKey()
+        if !allowActivation {
+            guard NSApp.isActive, window.isKeyWindow else { return }
+        } else {
+            if !NSApp.isActive {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            if !window.isKeyWindow {
+                window.makeKey()
+            }
+            if !window.isVisible {
+                window.orderFront(nil)
+            }
         }
-        // Ensure window is visible and on screen
-        if !window.isVisible {
-            window.orderFront(nil)
-        }
-        // Make this text field first responder
+        
         window.makeFirstResponder(self)
         
-        // Also try to get the field editor and make it first responder
         if let editor = self.currentEditor() {
             window.makeFirstResponder(editor)
         }
+
+        window.initialFirstResponder = self
         
-        // Force the window to become key if it isn't already
-        if !window.isKeyWindow {
+        if allowActivation, !window.isKeyWindow {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
         }
@@ -509,6 +564,11 @@ class CustomNSTextField: NSTextField {
                let customEditor = window.fieldEditor(false, for: self) as? CustomFieldEditor {
                 customEditor.cursorBlinking = cursorBlinking
             }
+        }
+    }
+    var cursorColor: NSColor = .white {
+        didSet {
+            updateCursorColor()
         }
     }
     var onSubmit: (() -> Void)?
@@ -612,6 +672,22 @@ required init?(coder: NSCoder) {
                 editor.needsDisplay = true
                 editor.updateInsertionPointStateAndRestartTimer(true)
             }
+        }
+        updateCursorColor()
+    }
+    
+    @MainActor
+    private func updateCursorColor() {
+        if let editor = currentEditor() as? NSTextView {
+            editor.insertionPointColor = cursorColor
+            editor.needsDisplay = true
+            objc_setAssociatedObject(editor, &cursorColorKey, cursorColor, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+        if let window = self.window,
+           let editor = window.fieldEditor(false, for: self) as? NSTextView {
+            editor.insertionPointColor = cursorColor
+            editor.needsDisplay = true
+            objc_setAssociatedObject(editor, &cursorColorKey, cursorColor, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         }
     }
     
@@ -730,12 +806,24 @@ required init?(coder: NSCoder) {
         if Thread.isMainThread, let timer = cursorTimer {
             timer.invalidate()
         } else if let timer = cursorTimer {
-            // If not on main thread, we need to invalidate it
-            // Use a synchronous dispatch to ensure cleanup happens
             DispatchQueue.main.sync {
                 timer.invalidate()
             }
         }
+
+        let id = sessionID
+        let identifier = ObjectIdentifier(self)
+        if let id {
+            Task { @MainActor in
+                CommandInputFocusController.shared.unregister(sessionID: id, identifier: identifier)
+            }
+        }
+    }
+
+    @MainActor
+    private func registerIfPossible() {
+        guard let sessionID = sessionID, window != nil else { return }
+        CommandInputFocusController.shared.register(field: self, sessionID: sessionID)
     }
 }
 
@@ -888,7 +976,7 @@ extension CustomFieldEditor {
         cursorBlinking = field.cursorBlinking
         font = field.font
         textColor = field.textColor
-        insertionPointColor = field.textColor ?? .labelColor
+        insertionPointColor = field.cursorColor
         backgroundColor = .clear
         drawsBackground = false
         isRichText = false
@@ -917,7 +1005,8 @@ extension NSTextView {
             guard turnedOn else { 
                 return 
             }
-            color.set()
+            let insertionColor = (objc_getAssociatedObject(self, &cursorColorKey) as? NSColor) ?? color
+            insertionColor.set()
             
             // Draw custom cursor based on style
             switch storedStyle {
@@ -945,10 +1034,12 @@ extension NSTextView {
         if let textField = self.delegate as? NSTextField,
            let customField = textField as? CustomNSTextField {
             guard turnedOn else { return }
-            color.set()
+            let insertionColor = customField.cursorColor
+            insertionColor.set()
             
             // Set the associated object for future calls
             objc_setAssociatedObject(self, &cursorStyleKey, customField.cursorStyle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            objc_setAssociatedObject(self, &cursorColorKey, insertionColor, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
             
             switch customField.cursorStyle {
             case .bar:
@@ -968,7 +1059,8 @@ extension NSTextView {
         
         // Default behavior - draw a simple vertical bar
         guard turnedOn else { return }
-        color.set()
+        let insertionColor = (objc_getAssociatedObject(self, &cursorColorKey) as? NSColor) ?? color
+        insertionColor.set()
         NSBezierPath.strokeLine(from: NSPoint(x: rect.midX, y: rect.minY), to: NSPoint(x: rect.midX, y: rect.maxY))
     }
     
