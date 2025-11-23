@@ -1074,8 +1074,14 @@ struct TerminalView: View {
             guard NSApp.isActive, tfWindow.isKeyWindow else { return }
         }
         // Since we're already @MainActor, execute directly without DispatchQueue
-        if tfWindow.makeFirstResponder(textField), let editor = textField.currentEditor() {
-            tfWindow.makeFirstResponder(editor)
+        // Use Task with user-interactive QoS to avoid priority inversion when calling AppKit methods
+        Task(priority: .userInitiated) { @MainActor in
+            if tfWindow.makeFirstResponder(textField) {
+                // Get editor asynchronously to avoid blocking
+                if let editor = textField.currentEditor() {
+                    tfWindow.makeFirstResponder(editor)
+                }
+            }
         }
     }
 
@@ -1094,8 +1100,14 @@ struct TerminalView: View {
             guard NSApp.isActive, tfWindow.isKeyWindow else { return }
         }
         // Since we're already @MainActor, execute directly without DispatchQueue
-        if tfWindow.makeFirstResponder(pwdField), let editor = pwdField.currentEditor() {
-            tfWindow.makeFirstResponder(editor)
+        // Use Task with user-interactive QoS to avoid priority inversion when calling AppKit methods
+        Task(priority: .userInitiated) { @MainActor in
+            if tfWindow.makeFirstResponder(pwdField) {
+                // Get editor asynchronously to avoid blocking
+                if let editor = pwdField.currentEditor() {
+                    tfWindow.makeFirstResponder(editor)
+                }
+            }
         }
     }
     

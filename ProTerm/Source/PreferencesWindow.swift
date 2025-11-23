@@ -201,3 +201,168 @@ extension View {
     }
 }
 
+/// A custom window controller for SSH connection/key edit dialogs
+@MainActor
+class SSHEditWindowController: NSWindowController, NSWindowDelegate {
+    static var shared: SSHEditWindowController?
+    
+    var isPresented: Bool = false {
+        didSet {
+            if isPresented && !oldValue {
+                showWindow()
+            } else if !isPresented && oldValue {
+                closeWindow()
+            }
+        }
+    }
+    
+    private var hostingView: NSHostingView<AnyView>?
+    private var contentView: AnyView?
+    private var onClose: (() -> Void)?
+    
+    override init(window: NSWindow?) {
+        super.init(window: window)
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    func setContent(_ content: AnyView, onClose: @escaping () -> Void) {
+        self.contentView = content
+        self.onClose = onClose
+        if window != nil {
+            updateWindowContent()
+        }
+    }
+    
+    func showWindow() {
+        if window == nil {
+            createWindow()
+        }
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    func closeWindow() {
+        window?.close()
+    }
+    
+    private func createWindow() {
+        guard let content = contentView else {
+            let placeholder = AnyView(
+                VStack {
+                    ProgressView()
+                    Text("Loading...")
+                        .padding()
+                }
+                .frame(width: 500, height: 450)
+            )
+        let hostingView = NSHostingView(rootView: placeholder)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 500, height: 500)
+        
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 500),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            
+            window.title = "SSH Connection"
+            window.contentView = hostingView
+            window.center()
+            window.isReleasedWhenClosed = false
+            window.delegate = self
+            window.isMovableByWindowBackground = true
+            window.minSize = NSSize(width: 500, height: 500)
+            window.maxSize = NSSize(width: 500, height: 500)
+            
+            self.window = window
+            self.hostingView = hostingView
+            return
+        }
+        
+        let hostingView = NSHostingView(rootView: content)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 500, height: 500)
+        
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 500),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        
+        window.title = "SSH Connection"
+        window.contentView = hostingView
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.isMovableByWindowBackground = true
+        window.minSize = NSSize(width: 500, height: 450)
+        window.maxSize = NSSize(width: 500, height: 450)
+        
+        self.window = window
+        self.hostingView = hostingView
+    }
+    
+    private func updateWindowContent() {
+        guard let content = contentView, let window = window else { return }
+        let hostingView = NSHostingView(rootView: content)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 500, height: 500)
+        window.contentView = hostingView
+        self.hostingView = hostingView
+    }
+    
+    func windowWillClose(_ notification: Notification) {
+        onClose?()
+    }
+}
+
+/// A view modifier to present SSH edit dialogs in a detached window
+struct SSHEditWindowModifier: ViewModifier {
+    @Binding var isPresented: Bool
+    let content: () -> AnyView
+    let title: String
+    
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: isPresented) { oldValue, newValue in
+                if newValue {
+                    DispatchQueue.main.async {
+                        // Close existing window if any
+                        if let existing = SSHEditWindowController.shared {
+                            existing.window?.close()
+                            SSHEditWindowController.shared = nil
+                        }
+                        
+                        // Create new controller and set content
+                        let controller = SSHEditWindowController(window: nil)
+                        let contentView = self.content()
+                        controller.setContent(contentView) {
+                            DispatchQueue.main.async {
+                                isPresented = false
+                            }
+                        }
+                        if let window = controller.window {
+                            window.title = title
+                        }
+                        controller.isPresented = true
+                        SSHEditWindowController.shared = controller
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        if let controller = SSHEditWindowController.shared, controller.isPresented {
+                            controller.closeWindow()
+                        }
+                    }
+                }
+            }
+    }
+}
+
+extension View {
+    func sshEditWindow(isPresented: Binding<Bool>, title: String = "SSH Connection", @ViewBuilder content: @escaping () -> some View) -> some View {
+        modifier(SSHEditWindowModifier(isPresented: isPresented, content: { AnyView(content()) }, title: title))
+    }
+}
+

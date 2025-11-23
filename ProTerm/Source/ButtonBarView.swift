@@ -44,6 +44,51 @@ struct ButtonBarView: View {
             Divider()
                 .frame(height: 20)
             
+            // MARK: - SSH Connections
+            Menu {
+                if integrationFeatures.sshConnections.isEmpty {
+                    Text("No SSH connections saved")
+                        .disabled(true)
+                } else {
+                    ForEach(integrationFeatures.sshConnections) { connection in
+                        Button(action: {
+                            connectToSSH(connection)
+                        }) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(connection.name)
+                                        .font(.headline)
+                                    Text("\(connection.username)@\(connection.host):\(connection.port)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                if connection.isActive {
+                                    Spacer()
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "network")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.orange)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.clear)
+                    )
+            }
+            .menuStyle(.borderlessButton)
+            .help("SSH Connections")
+            .accessibilityLabel("SSH Connections")
+            .accessibilityHint("Open menu to select and connect to a saved SSH connection")
+            
+            Divider()
+                .frame(height: 20)
+            
             // MARK: - Quick Commands Toggle
             ToolbarButton(
                 icon: showQuickCommands ? "sidebar.right" : "sidebar.left",
@@ -162,6 +207,70 @@ struct ButtonBarView: View {
             ToastManager.shared.show("Session closed", type: .info)
         } else {
             ToastManager.shared.show("Cannot close last session", type: .warning)
+        }
+    }
+    
+    private func connectToSSH(_ connection: IntegrationFeatures.SSHConnection) {
+        // Create a new session
+        terminalManager.addSession()
+        selectedTab = terminalManager.sessions.count - 1
+        
+        // Update tab name to show SSH connection name
+        if let session = activeSession {
+            terminalManager.updateTabName(for: session.id, name: connection.name)
+        }
+        
+        // Build SSH command
+        var sshCommand = ""
+        
+        if connection.usesPassword, let password = integrationFeatures.getPassword(for: connection) {
+            // Build base SSH command
+            var baseSSHCommand = "ssh"
+            
+            // Add port if not default
+            if connection.port != 22 {
+                baseSSHCommand += " -p \(connection.port)"
+            }
+            
+            // Disable key authentication when using password
+            baseSSHCommand += " -o PreferredAuthentications=password -o PubkeyAuthentication=no"
+            
+            // Add username@host
+            baseSSHCommand += " \(connection.username)@\(connection.host)"
+            
+            // Escape password for shell (single quotes are safest)
+            let escapedPassword = password.replacingOccurrences(of: "'", with: "'\"'\"'")
+            
+            // Use sshpass if available, otherwise use expect
+            // Note: sshpass may need to be installed via Homebrew: brew install hudochenkov/sshpass/sshpass
+            sshCommand = "if command -v sshpass > /dev/null 2>&1; then sshpass -p '\(escapedPassword)' \(baseSSHCommand); else expect -c \"spawn \(baseSSHCommand); expect \\\"password:\\\"; send \\\"\(escapedPassword)\\r\\\"; interact\"; fi"
+        } else {
+            // Use SSH key authentication
+            sshCommand = "ssh"
+            
+            // Add port if not default
+            if connection.port != 22 {
+                sshCommand += " -p \(connection.port)"
+            }
+            
+            // Add key path if specified (escape spaces)
+            if let keyPath = connection.keyPath, !keyPath.isEmpty {
+                let escapedPath = keyPath.replacingOccurrences(of: " ", with: "\\ ")
+                sshCommand += " -i \(escapedPath)"
+            }
+            
+            // Add username@host
+            sshCommand += " \(connection.username)@\(connection.host)"
+        }
+        
+        // Mark connection as active
+        integrationFeatures.connectSSH(connection)
+        
+        // Send the command to the new session
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard let session = self.activeSession else { return }
+            session.sendInput(sshCommand + "\n")
+            ToastManager.shared.show("Connecting to \(connection.name)...", type: .info)
         }
     }
     

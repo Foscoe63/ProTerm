@@ -116,6 +116,7 @@ class IntegrationFeatures: NSObject, ObservableObject {
         let port: Int
         let username: String
         let keyPath: String?
+        var usesPassword: Bool // Indicates if password authentication is used
         var isActive: Bool
         var lastConnected: Date?
     }
@@ -315,7 +316,7 @@ class IntegrationFeatures: NSObject, ObservableObject {
     
     // MARK: - SSH Connection Management
     
-    func addSSHConnection(name: String, host: String, port: Int = 22, username: String, keyPath: String? = nil) {
+    func addSSHConnection(name: String, host: String, port: Int = 22, username: String, keyPath: String? = nil, password: String? = nil) {
         let connection = SSHConnection(
             id: UUID(),
             name: name,
@@ -323,16 +324,31 @@ class IntegrationFeatures: NSObject, ObservableObject {
             port: port,
             username: username,
             keyPath: keyPath,
+            usesPassword: password != nil,
             isActive: false,
             lastConnected: nil
         )
         sshConnections.append(connection)
+        
+        // Store password in Keychain if provided
+        if let password = password, !password.isEmpty {
+            _ = KeychainHelper.shared.savePassword(password, for: connection.id)
+        }
+        
         saveSSHConnections()
     }
     
     func removeSSHConnection(_ connection: SSHConnection) {
+        // Remove password from Keychain
+        _ = KeychainHelper.shared.deletePassword(for: connection.id)
+        
         sshConnections.removeAll { $0.id == connection.id }
         saveSSHConnections()
+    }
+    
+    /// Get password for a connection from Keychain
+    func getPassword(for connection: SSHConnection) -> String? {
+        return KeychainHelper.shared.getPassword(for: connection.id)
     }
     
     func connectSSH(_ connection: SSHConnection) {

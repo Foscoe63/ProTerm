@@ -1688,7 +1688,7 @@ struct SSHConnectionSettings: View {
             }
             .padding()
         }
-        .sheet(isPresented: $showingAddConnection) {
+        .sshEditWindow(isPresented: $showingAddConnection, title: "Add SSH Connection") {
             AddEditSSHConnectionSheet(
                 connection: nil,
                 integrationFeatures: integrationFeatures,
@@ -1700,7 +1700,7 @@ struct SSHConnectionSettings: View {
                 }
             )
         }
-        .sheet(isPresented: $showingEditConnection) {
+        .sshEditWindow(isPresented: $showingEditConnection, title: "Edit SSH Connection") {
             if let connection = editingConnection {
                 AddEditSSHConnectionSheet(
                     connection: connection,
@@ -1716,7 +1716,7 @@ struct SSHConnectionSettings: View {
                 )
             }
         }
-        .sheet(isPresented: $showingAddKey) {
+        .sshEditWindow(isPresented: $showingAddKey, title: "Add SSH Key") {
             AddSSHKeySheet(
                 integrationFeatures: integrationFeatures,
                 onSave: {
@@ -1852,6 +1852,8 @@ struct AddEditSSHConnectionSheet: View {
     @State private var port: Int = 22
     @State private var username: String = ""
     @State private var selectedKeyPath: String? = nil
+    @State private var password: String = ""
+    @State private var usePassword: Bool = false
     
     var isEditing: Bool {
         connection != nil
@@ -1862,6 +1864,7 @@ struct AddEditSSHConnectionSheet: View {
             Text(isEditing ? "Edit SSH Connection" : "Add SSH Connection")
                 .font(.title2)
                 .fontWeight(.bold)
+                .padding(.top, 8)
             
             Divider()
             
@@ -1887,15 +1890,29 @@ struct AddEditSSHConnectionSheet: View {
                 TextField("e.g., admin", text: $username)
                     .textFieldStyle(.roundedBorder)
                 
-                Text("SSH Key (Optional)")
+                Text("Authentication Method")
                     .font(.headline)
-                Picker("SSH Key", selection: $selectedKeyPath) {
-                    Text("None").tag(nil as String?)
-                    ForEach(integrationFeatures.sshKeys) { key in
-                        Text(key.name).tag(key.path as String?)
-                    }
+                
+                Picker("Authentication", selection: $usePassword) {
+                    Text("SSH Key").tag(false)
+                    Text("Password").tag(true)
                 }
-                .pickerStyle(.menu)
+                .pickerStyle(.segmented)
+                
+                if usePassword {
+                    SecureField("Enter password", text: $password)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("SSH Password")
+                        .accessibilityHint("Enter the password for SSH authentication")
+                } else {
+                    Picker("SSH Key", selection: $selectedKeyPath) {
+                        Text("None").tag(nil as String?)
+                        ForEach(integrationFeatures.sshKeys) { key in
+                            Text(key.name).tag(key.path as String?)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
             }
             
             Spacer()
@@ -1906,25 +1923,30 @@ struct AddEditSSHConnectionSheet: View {
                     .keyboardShortcut(.escape)
                 Button("Save", action: {
                     if isEditing, let conn = connection {
-                        // Update existing connection
+                        // Update existing connection - remove old password
                         integrationFeatures.removeSSHConnection(conn)
                     }
+                    let passwordToSave = usePassword && !password.isEmpty ? password : nil
                     integrationFeatures.addSSHConnection(
                         name: name,
                         host: host,
                         port: port,
                         username: username,
-                        keyPath: selectedKeyPath
+                        keyPath: usePassword ? nil : selectedKeyPath,
+                        password: passwordToSave
                     )
+                    password = "" // Clear password from memory
                     onSave()
                 })
                     .buttonStyle(.borderedProminent)
                     .disabled(name.isEmpty || host.isEmpty || username.isEmpty)
                     .keyboardShortcut(.return)
             }
+            .padding(.bottom, 8)
         }
-        .padding()
-        .frame(width: 500, height: 400)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 20)
+        .frame(width: 500, height: 500)
         .onAppear {
             if let conn = connection {
                 name = conn.name
@@ -1932,6 +1954,9 @@ struct AddEditSSHConnectionSheet: View {
                 port = conn.port
                 username = conn.username
                 selectedKeyPath = conn.keyPath
+                usePassword = conn.usesPassword
+                // Don't load password from Keychain for security - user must re-enter
+                // Password will be loaded when connecting
             }
         }
     }
