@@ -72,37 +72,33 @@ final class SSHSessionManager: @unchecked Sendable {
         // -----------------------------------------------------------------
         // Launch the command via PTYWrapper.
         // -----------------------------------------------------------------
-        do {
-            let handler = try PTYWrapper(command: execPath, args: args)
+        let handler = PTYWrapper(command: execPath, args: args)
 
-            // Attach the PTY to the session (stores master FD, child PID, etc.).
-            session.attachPTY(handler)
+        // Attach the PTY to the session (stores master FD, child PID, etc.).
+        session.attachPTY(handler)
 
-            // Forward PTY output to the UI.
-            handler.startReading { [weak session] text in
-                DispatchQueue.main.async {
-                    guard let s = session else { return }
-                    var out = s.output
-                    if !out.hasSuffix("\n") && !out.isEmpty { out += "\n" }
-                    s.output = out + text
-                }
+        // Forward PTY output to the UI.
+        handler.startReading { [weak session] text in
+            DispatchQueue.main.async {
+                guard let s = session else { return }
+                var out = s.output
+                if !out.hasSuffix("\n") && !out.isEmpty { out += "\n" }
+                s.output = out + text
             }
-
-            // Monitor child exit – when the remote shell ends we clear flags.
-            let monitor = DispatchSource.makeProcessSource(identifier: handler.childPID,
-                                                          eventMask: .exit,
-                                                          queue: DispatchQueue.global(qos: .userInitiated))
-            monitor.setEventHandler { [weak session] in
-                DispatchQueue.main.async {
-                    session?.isProcessRunning = false
-                    handler.stop()
-                }
-            }
-            monitor.resume()
-
-            return .success(session)
-        } catch {
-            return .failure(.launchFailed(error))
         }
+
+        // Monitor child exit – when the remote shell ends we clear flags.
+        let monitor = DispatchSource.makeProcessSource(identifier: handler.childPID,
+                                                      eventMask: .exit,
+                                                      queue: DispatchQueue.global(qos: .userInitiated))
+        monitor.setEventHandler { [weak session] in
+            DispatchQueue.main.async {
+                session?.isProcessRunning = false
+                handler.stop()
+            }
+        }
+        monitor.resume()
+
+        return .success(session)
     }
 }
