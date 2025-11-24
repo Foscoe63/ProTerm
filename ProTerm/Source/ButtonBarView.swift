@@ -211,65 +211,35 @@ struct ButtonBarView: View {
     }
     
     private func connectToSSH(_ connection: IntegrationFeatures.SSHConnection) {
-        // Create a new session
-        terminalManager.addSession()
-        selectedTab = terminalManager.sessions.count - 1
-        
-        // Update tab name to show SSH connection name
-        if let session = activeSession {
-            terminalManager.updateTabName(for: session.id, name: connection.name)
-        }
-        
-        // Build SSH command
-        var sshCommand = ""
-        
-        if connection.usesPassword, let password = integrationFeatures.getPassword(for: connection) {
-            // Build base SSH command
-            var baseSSHCommand = "ssh"
-            
-            // Add port if not default
-            if connection.port != 22 {
-                baseSSHCommand += " -p \(connection.port)"
-            }
-            
-            // Disable key authentication when using password
-            baseSSHCommand += " -o PreferredAuthentications=password -o PubkeyAuthentication=no"
-            
-            // Add username@host
-            baseSSHCommand += " \(connection.username)@\(connection.host)"
-            
-            // Escape password for shell (single quotes are safest)
-            let escapedPassword = password.replacingOccurrences(of: "'", with: "'\"'\"'")
-            
-            // Use sshpass if available, otherwise use expect
-            // Note: sshpass may need to be installed via Homebrew: brew install hudochenkov/sshpass/sshpass
-            sshCommand = "if command -v sshpass > /dev/null 2>&1; then sshpass -p '\(escapedPassword)' \(baseSSHCommand); else expect -c \"spawn \(baseSSHCommand); expect \\\"password:\\\"; send \\\"\(escapedPassword)\\r\\\"; interact\"; fi"
-        } else {
-            // Use SSH key authentication
-            sshCommand = "ssh"
-            
-            // Add port if not default
-            if connection.port != 22 {
-                sshCommand += " -p \(connection.port)"
-            }
-            
-            // Add key path if specified (escape spaces)
-            if let keyPath = connection.keyPath, !keyPath.isEmpty {
-                let escapedPath = keyPath.replacingOccurrences(of: " ", with: "\\ ")
-                sshCommand += " -i \(escapedPath)"
-            }
-            
-            // Add username@host
-            sshCommand += " \(connection.username)@\(connection.host)"
-        }
-        
-        // Mark connection as active
+        // Mark the connection as active in the model first.
         integrationFeatures.connectSSH(connection)
-        
-        // Send the command to the new session
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            guard let session = self.activeSession else { return }
-            session.sendInput(sshCommand + "\n")
+
+        // Retrieve password from the keychain if this connection uses password auth.
+        let pwd: String? = connection.usesPassword ? integrationFeatures.getPassword(for: connection) : nil
+
+        // Launch an SSH session via the manager, passing the optional password.
+        let result = SSHSessionManager.shared.startSSH(to: connection.host,
+                                user: connection.username,
+                                password: pwd,
+                                shellManager: shellManager)
+
+        switch result {
+        case .failure(let err):
+            // Show an error toast – UI stays on the current tab.
+            ToastManager.shared.show(err.localizedDescription, type: .error)
+            return
+        case .success(let session):
+            // Store the live session for later disconnect.
+            integrationFeatures.activeSSHSession = session
+
+            // Add the new session to the manager and select its tab.
+            terminalManager.sessions.append(session)
+            selectedTab = terminalManager.sessions.count - 1
+
+            // Update the tab title to reflect the SSH connection name.
+            terminalManager.updateTabName(for: session.id, name: connection.name)
+
+            // No need to send a manual command – the PTY already runs `ssh`.
             ToastManager.shared.show("Connecting to \(connection.name)...", type: .info)
         }
     }

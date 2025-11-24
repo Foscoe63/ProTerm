@@ -90,6 +90,8 @@ class IntegrationFeatures: NSObject, ObservableObject {
     @Published var sshKeys: [SSHKey] = []
     @Published var sshConnections: [SSHConnection] = []
     @Published var activeSSHConnection: SSHConnection?
+    // Holds the TerminalSession that represents the live SSH connection.
+    @Published var activeSSHSession: TerminalSession?
     
     struct SSHKey: Identifiable, Codable {
         let id: UUID
@@ -352,7 +354,7 @@ class IntegrationFeatures: NSObject, ObservableObject {
     }
     
     func connectSSH(_ connection: SSHConnection) {
-        // This would establish the SSH connection
+        // Mark the connection as active and persist state.
         activeSSHConnection = connection
         if let index = sshConnections.firstIndex(where: { $0.id == connection.id }) {
             sshConnections[index].isActive = true
@@ -362,6 +364,16 @@ class IntegrationFeatures: NSObject, ObservableObject {
     }
     
     func disconnectSSH() {
+        // Stop any active SSH session first.
+        if let session = activeSSHSession {
+            // Gracefully interrupt the process; TerminalSession will clear flags.
+            session.interruptCurrentProcess()
+            // Remove the session from the manager if desired.
+            // The UI can keep the tab; we just clear the running flag.
+            activeSSHSession = nil
+        }
+
+        // Clear connection state.
         activeSSHConnection = nil
         for i in sshConnections.indices {
             sshConnections[i].isActive = false

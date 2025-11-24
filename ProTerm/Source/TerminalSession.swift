@@ -1008,6 +1008,20 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         sendSignal(SIGINT)
         process?.interrupt()
     }
+
+    // MARK: - PTY attachment helper
+    /// Attach a PTYWrapper that was created outside of this class (e.g., by
+    /// `SSHSessionManager`). This sets the internal PTY references and marks the
+    /// session as running so UI components can interact with it.
+    func attachPTY(_ handler: PTYWrapper) {
+        // Store the PTY handler and related file descriptors.
+        self.ptyHandler = handler
+        self.masterFD = handler.masterFD
+        self.childPID = handler.childPID
+        // The session is now running; we are not using a Foundation.Process.
+        self.isProcessRunning = true
+        self.process = nil
+    }
     
     func suspendCurrentProcess() {
         sendSignal(SIGTSTP)
