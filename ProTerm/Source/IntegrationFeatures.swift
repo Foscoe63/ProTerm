@@ -16,6 +16,31 @@ class IntegrationFeatures: NSObject, ObservableObject {
         loadSSHConnections()
         loadPlugins()
         setupDefaultPlugins()
+        
+        // Listen for SSH session close events
+        NotificationCenter.default.addObserver(
+            forName: Notification.Name("ProTermSSHSessionClosed"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self else { return }
+            // Extract the session ID before entering the Task to avoid data race
+            let sessionId = notification.object as? UUID
+            // Ensure we're on the main actor to access MainActor-isolated properties
+            Task { @MainActor [weak self] in
+                guard let self = self, let sessionId = sessionId else { return }
+                // Check if the closed session is the active SSH session
+                if let activeSession = self.activeSSHSession,
+                   activeSession.id == sessionId {
+                    // Disconnect the SSH connection
+                    self.disconnectSSH()
+                }
+            }
+        }
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
     
     // MARK: - Git Integration
@@ -119,8 +144,10 @@ class IntegrationFeatures: NSObject, ObservableObject {
         let username: String
         let keyPath: String?
         var usesPassword: Bool // Indicates if password authentication is used
-        var isActive: Bool
         var lastConnected: Date?
+        
+        // isActive is now computed based on activeSSHConnection
+        // Note: This requires access to IntegrationFeatures, so we'll handle it in the view
     }
     
     // MARK: - Cloud Sync
@@ -327,7 +354,6 @@ class IntegrationFeatures: NSObject, ObservableObject {
             username: username,
             keyPath: keyPath,
             usesPassword: password != nil,
-            isActive: false,
             lastConnected: nil
         )
         sshConnections.append(connection)
@@ -357,7 +383,6 @@ class IntegrationFeatures: NSObject, ObservableObject {
         // Mark the connection as active and persist state.
         activeSSHConnection = connection
         if let index = sshConnections.firstIndex(where: { $0.id == connection.id }) {
-            sshConnections[index].isActive = true
             sshConnections[index].lastConnected = Date()
         }
         saveSSHConnections()
@@ -375,10 +400,12 @@ class IntegrationFeatures: NSObject, ObservableObject {
 
         // Clear connection state.
         activeSSHConnection = nil
-        for i in sshConnections.indices {
-            sshConnections[i].isActive = false
-        }
         saveSSHConnections()
+    }
+    
+    // Helper to check if a connection is active
+    func isConnectionActive(_ connection: SSHConnection) -> Bool {
+        return activeSSHConnection?.id == connection.id
     }
     
     private func loadSSHConnections() {

@@ -1744,7 +1744,7 @@ struct SSHConnectionRow: View {
                 HStack {
                     Text(connection.name)
                         .font(.headline)
-                    if connection.isActive {
+                    if integrationFeatures.isConnectionActive(connection) {
                         Circle()
                             .fill(.green)
                             .frame(width: 8, height: 8)
@@ -1764,7 +1764,7 @@ struct SSHConnectionRow: View {
             }
             Spacer()
             HStack(spacing: 8) {
-                if !connection.isActive {
+                if !integrationFeatures.isConnectionActive(connection) {
                     Button("Connect", action: onConnect)
                         .buttonStyle(.bordered)
                 } else {

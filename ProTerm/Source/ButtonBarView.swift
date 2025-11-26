@@ -26,169 +26,183 @@ struct ButtonBarView: View {
     @Environment(\.dismiss) private var dismiss   // not used here, kept for completeness
 
     var body: some View {
-        HStack(spacing: 8) {
-            // MARK: - Session Management
-            ButtonGroup {
-                ToolbarButton(icon: "plus.square.on.square", help: "New Session", iconColor: .green, action: newSession)
-                ToolbarButton(icon: "xmark.square", help: "Close Current Session", iconColor: .red, action: closeCurrentSession)
-                ToolbarButton(
-                    icon: "stop.circle.fill",
-                    help: "Stop Running Command",
-                    isActive: false,
-                    iconColor: .red,
-                    isDisabled: !canStopProcess,
-                    action: stopActiveProcess
-                )
+        toolbarContent
+            .padding(.horizontal, 4)
+            .padding(.vertical, 4)
+            .preferencesWindow(isPresented: $showingPreferences) {
+                preferencesContent
             }
-            
-            Divider()
-                .frame(height: 20)
-            
-            // MARK: - SSH Connections
-            Menu {
-                if integrationFeatures.sshConnections.isEmpty {
-                    Text("No SSH connections saved")
-                        .disabled(true)
-                } else {
-                    ForEach(integrationFeatures.sshConnections) { connection in
-                        Button(action: {
-                            connectToSSH(connection)
-                        }) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(connection.name)
-                                        .font(.headline)
-                                    Text("\(connection.username)@\(connection.host):\(connection.port)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                if connection.isActive {
-                                    Spacer()
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.green)
-                                }
+            .sheet(isPresented: $showingSearchReplace) {
+                SearchReplaceSheet(findText: $findText, replaceText: $replaceText)
+            }
+            .sheet(isPresented: $showingQuickSearch) {
+                QuickSearchSheet(searchQuery: $searchQuery)
+            }
+            .sheet(isPresented: $showingChatbot) {
+                ChatbotView()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermShowPreferences"))) { _ in
+                showingPreferences = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermClosePreferences"))) { _ in
+                showingPreferences = false
+            }
+    }
+    
+    private var toolbarContent: some View {
+        HStack(spacing: 8) {
+            sessionManagementButtons
+            toolbarDivider
+            sshConnectionsMenu
+            toolbarDivider
+            quickCommandsToggle
+            toolbarDivider
+            copyPasteButtons
+            toolbarDivider
+            searchButtons
+            toolbarDivider
+            clearScreenButton
+            toolbarDivider
+            historyButtons
+            toolbarDivider
+            commandPaletteButton
+            toolbarDivider
+            systemInfoButton
+            toolbarDivider
+            aiChatbotButton
+            toolbarDivider
+            preferencesButton
+            Spacer()
+        }
+    }
+    
+    private var toolbarDivider: some View {
+        Divider()
+            .frame(height: 20)
+    }
+    
+    private var sessionManagementButtons: some View {
+        ButtonGroup {
+            ToolbarButton(icon: "plus.square.on.square", help: "New Session", iconColor: .green, action: newSession)
+            ToolbarButton(icon: "xmark.square", help: "Close Current Session", iconColor: .red, action: closeCurrentSession)
+            ToolbarButton(
+                icon: "stop.circle.fill",
+                help: "Stop Running Command",
+                isActive: false,
+                iconColor: .red,
+                isDisabled: !canStopProcess,
+                action: stopActiveProcess
+            )
+        }
+    }
+    
+    private var sshConnectionsMenu: some View {
+        Menu {
+            if integrationFeatures.sshConnections.isEmpty {
+                Text("No SSH connections saved")
+                    .disabled(true)
+            } else {
+                ForEach(integrationFeatures.sshConnections) { connection in
+                    Button(action: {
+                        connectToSSH(connection)
+                    }) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(connection.name)
+                                    .font(.headline)
+                                Text("\(connection.username)@\(connection.host):\(connection.port)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            if integrationFeatures.isConnectionActive(connection) {
+                                Spacer()
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
                             }
                         }
                     }
                 }
-            } label: {
-                Image(systemName: "network")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.orange)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.clear)
-                    )
             }
-            .menuStyle(.borderlessButton)
-            .help("SSH Connections")
-            .accessibilityLabel("SSH Connections")
-            .accessibilityHint("Open menu to select and connect to a saved SSH connection")
-            
-            Divider()
-                .frame(height: 20)
-            
-            // MARK: - Quick Commands Toggle
-            ToolbarButton(
-                icon: showQuickCommands ? "sidebar.right" : "sidebar.left",
-                help: "Toggle Quick Commands",
-                isActive: showQuickCommands,
-                iconColor: showQuickCommands ? .blue : .orange,
-                action: { showQuickCommands.toggle() }
-            )
-
-            Divider()
-                .frame(height: 20)
-
-            // MARK: - Copy/Paste
-            ButtonGroup {
-                ToolbarButton(icon: "doc.on.doc", help: "Copy Output", iconColor: .blue, action: copyOutput)
-                ToolbarButton(icon: "doc.on.clipboard", help: "Paste to Input", iconColor: .purple, action: pasteToInput)
-            }
-            
-            Divider()
-                .frame(height: 20)
-
-            // MARK: - Search & Replace
-            ButtonGroup {
-                ToolbarButton(icon: "magnifyingglass", help: "Quick Search", iconColor: .cyan, action: quickSearch)
-                ToolbarButton(icon: "textformat.abc", help: "Search & Replace", iconColor: .indigo, action: { showingSearchReplace.toggle() })
-            }
-            
-            Divider()
-                .frame(height: 20)
-
-            // MARK: - Clear Screen
-            ToolbarButton(icon: "trash", help: "Clear Screen", iconColor: .red.opacity(0.8), action: clearScreen)
-            
-            Divider()
-                .frame(height: 20)
-
-            // MARK: - History & Commands
-            ButtonGroup {
-                ToolbarButton(icon: "clock.arrow.circlepath", help: "Command History", iconColor: .yellow, action: showHistory)
-                ToolbarButton(icon: "arrow.clockwise", help: "Copy Last Command", iconColor: .mint, action: copyLastCommand)
-            }
-            
-            Divider()
-                .frame(height: 20)
-            
-            // MARK: - Command Palette
-            ToolbarButton(icon: "command", help: "Command Palette (Cmd+P)", iconColor: .pink, action: showCommandPalette)
-            
-            Divider()
-                .frame(height: 20)
-            
-            // MARK: - System Info
-            ToolbarButton(icon: "info.circle", help: "System Information", iconColor: .teal, action: showSystemInfo)
-            
-            Divider()
-                .frame(height: 20)
-
-            // MARK: - AI Chatbot
-            ToolbarButton(icon: "sparkles", help: "AI Chatbot", iconColor: .pink, action: { showingChatbot.toggle() })
-            
-            Divider()
-                .frame(height: 20)
-            
-            // MARK: - Preferences
-            ToolbarButton(icon: "gearshape", help: "Preferences…", iconColor: .gray, action: { showingPreferences.toggle() })
-            
-            Spacer()
+        } label: {
+            Image(systemName: "network")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.orange)
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.clear)
+                )
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 4)
-        .preferencesWindow(isPresented: $showingPreferences) {
-            PreferencesView()
-                .environmentObject(terminalManager)
-                .environmentObject(themeManager)
-                .environmentObject(shellManager)
-                .environmentObject(lineNumbersManager)
-                .environmentObject(productivityTools)
-                .environmentObject(advancedFeatures)
-                .environmentObject(fontManager)
-                .environmentObject(terminalVisualSettings)
-                .environmentObject(integrationFeatures)
-                .environmentObject(keyboardShortcutsManager)
-                .environmentObject(aiManager)
+        .menuStyle(.borderlessButton)
+        .help("SSH Connections")
+        .accessibilityLabel("SSH Connections")
+        .accessibilityHint("Open menu to select and connect to a saved SSH connection")
+    }
+    
+    private var quickCommandsToggle: some View {
+        ToolbarButton(
+            icon: showQuickCommands ? "sidebar.right" : "sidebar.left",
+            help: "Toggle Quick Commands",
+            isActive: showQuickCommands,
+            iconColor: showQuickCommands ? .blue : .orange,
+            action: { showQuickCommands.toggle() }
+        )
+    }
+    
+    private var copyPasteButtons: some View {
+        ButtonGroup {
+            ToolbarButton(icon: "doc.on.doc", help: "Copy Output", iconColor: .blue, action: copyOutput)
+            ToolbarButton(icon: "doc.on.clipboard", help: "Paste to Input", iconColor: .purple, action: pasteToInput)
         }
-        .sheet(isPresented: $showingSearchReplace) {
-            SearchReplaceSheet(findText: $findText, replaceText: $replaceText)
+    }
+    
+    private var searchButtons: some View {
+        ButtonGroup {
+            ToolbarButton(icon: "magnifyingglass", help: "Quick Search", iconColor: .cyan, action: quickSearch)
+            ToolbarButton(icon: "textformat.abc", help: "Search & Replace", iconColor: .indigo, action: { showingSearchReplace.toggle() })
         }
-        .sheet(isPresented: $showingQuickSearch) {
-            QuickSearchSheet(searchQuery: $searchQuery)
+    }
+    
+    private var clearScreenButton: some View {
+        ToolbarButton(icon: "trash", help: "Clear Screen", iconColor: .red.opacity(0.8), action: clearScreen)
+    }
+    
+    private var historyButtons: some View {
+        ButtonGroup {
+            ToolbarButton(icon: "clock.arrow.circlepath", help: "Command History", iconColor: .yellow, action: showHistory)
+            ToolbarButton(icon: "arrow.clockwise", help: "Copy Last Command", iconColor: .mint, action: copyLastCommand)
         }
-        .sheet(isPresented: $showingChatbot) {
-            ChatbotView()
-        }
-        // Listen for the menu‑command notification
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermShowPreferences"))) { _ in
-            showingPreferences = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermClosePreferences"))) { _ in
-            showingPreferences = false
-        }
+    }
+    
+    private var commandPaletteButton: some View {
+        ToolbarButton(icon: "command", help: "Command Palette (Cmd+P)", iconColor: .pink, action: showCommandPalette)
+    }
+    
+    private var systemInfoButton: some View {
+        ToolbarButton(icon: "info.circle", help: "System Information", iconColor: .teal, action: showSystemInfo)
+    }
+    
+    private var aiChatbotButton: some View {
+        ToolbarButton(icon: "sparkles", help: "AI Chatbot", iconColor: .pink, action: { showingChatbot.toggle() })
+    }
+    
+    private var preferencesButton: some View {
+        ToolbarButton(icon: "gearshape", help: "Preferences…", iconColor: .gray, action: { showingPreferences.toggle() })
+    }
+    
+    private var preferencesContent: some View {
+        PreferencesView()
+            .environmentObject(terminalManager)
+            .environmentObject(themeManager)
+            .environmentObject(shellManager)
+            .environmentObject(lineNumbersManager)
+            .environmentObject(productivityTools)
+            .environmentObject(advancedFeatures)
+            .environmentObject(fontManager)
+            .environmentObject(terminalVisualSettings)
+            .environmentObject(integrationFeatures)
+            .environmentObject(keyboardShortcutsManager)
+            .environmentObject(aiManager)
     }
 
     // MARK: – Actions
@@ -217,9 +231,11 @@ struct ButtonBarView: View {
         // Retrieve password from the keychain if this connection uses password auth.
         let pwd: String? = connection.usesPassword ? integrationFeatures.getPassword(for: connection) : nil
 
-        // Launch an SSH session via the manager, passing the optional password.
+        // Launch an SSH session via the manager, passing the optional password, port, and key path.
         let result = SSHSessionManager.shared.startSSH(to: connection.host,
                                 user: connection.username,
+                                port: connection.port,
+                                keyPath: connection.keyPath,
                                 password: pwd,
                                 shellManager: shellManager)
 
@@ -232,14 +248,15 @@ struct ButtonBarView: View {
             // Store the live session for later disconnect.
             integrationFeatures.activeSSHSession = session
 
-            // Add the new session to the manager and select its tab.
+            // Add the new session to the manager IMMEDIATELY
+            // This ensures the observer is ready to receive notifications
             terminalManager.sessions.append(session)
             selectedTab = terminalManager.sessions.count - 1
 
             // Update the tab title to reflect the SSH connection name.
             terminalManager.updateTabName(for: session.id, name: connection.name)
 
-            // No need to send a manual command – the PTY already runs `ssh`.
+            // Show connection message
             ToastManager.shared.show("Connecting to \(connection.name)...", type: .info)
         }
     }

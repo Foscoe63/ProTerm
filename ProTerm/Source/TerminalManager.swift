@@ -118,7 +118,17 @@ final class TerminalManager: ObservableObject {
             title: "Session Closed",
             body: "Closed session \(index + 1)"
         )
-        let sessionId = sessions[index].id
+        let session = sessions[index]
+        let sessionId = session.id
+        
+        // If this is an SSH session, notify IntegrationFeatures to disconnect
+        if session.isSSHSession {
+            NotificationCenter.default.post(
+                name: Notification.Name("ProTermSSHSessionClosed"),
+                object: sessionId
+            )
+        }
+        
         sessions.remove(at: index)
         tabMetadata.removeValue(forKey: sessionId)
     }

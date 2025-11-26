@@ -1,8 +1,15 @@
 import Foundation
 import Darwin
 
+// Terminal control structures
+#if os(macOS) || os(iOS)
+import Darwin.C
+#else
+import Glibc
+#endif
+
 /// PTYWrapper encapsulates a pseudo‑terminal for interactive subprocesses.
-final class PTYWrapper {
+final class PTYWrapper: @unchecked Sendable {
     // MARK: - Public API
 
     /// Closure called whenever the PTY produces output.
@@ -21,10 +28,18 @@ final class PTYWrapper {
     ///   - args: Arguments passed to the command.
     ///   - env: Optional environment dictionary.
     init(command: String, args: [String] = [], env: [String:String]? = nil) {
+        #if DEBUG
+        print("[ProTerm][PTY] Creating PTYWrapper for: \(command) \(args.joined(separator: " "))")
+        #endif
         // 1️⃣ Create master PTY
         var master: Int32 = -1
         master = posix_openpt(O_RDWR)
-        guard master != -1 else { fatalError("posix_openpt failed") }
+        guard master != -1 else {
+            #if DEBUG
+            print("[ProTerm][PTY] ERROR: posix_openpt failed")
+            #endif
+            fatalError("posix_openpt failed")
+        }
 
         // 2️⃣ Grant and unlock the slave side
         guard grantpt(master) == 0 else { fatalError("grantpt failed") }
@@ -37,6 +52,25 @@ final class PTYWrapper {
         // 4️⃣ Open the slave side
         let slave = open(slavePath, O_RDWR)
         guard slave != -1 else { fatalError("open slave failed") }
+        
+        // 4.5️⃣ Configure terminal attributes on slave BEFORE spawning
+        // For SSH, we need raw mode for proper interactive operation
+        // SSH handles its own terminal configuration for password prompts and remote shell
+        var tio = termios()
+        if tcgetattr(slave, &tio) == 0 {
+            // Use raw mode for SSH - this is critical for proper operation
+            cfmakeraw(&tio)
+            // Set terminal attributes
+            _ = tcsetattr(slave, TCSANOW, &tio)
+        }
+        
+        // Set window size on slave (SSH needs this)
+        var ws = winsize()
+        ws.ws_row = 24  // Default rows
+        ws.ws_col = 80  // Default columns
+        ws.ws_xpixel = 0
+        ws.ws_ypixel = 0
+        _ = ioctl(slave, TIOCSWINSZ, &ws)
 
         // 5️⃣ Spawn the process using posix_spawn
         var pid: pid_t = 0
@@ -70,9 +104,15 @@ final class PTYWrapper {
         // Spawn
         let spawnResult = posix_spawn(&pid, command, &fileActions, nil, cArgs, env != nil ? cEnv : nil)
         if spawnResult != 0 {
+            #if DEBUG
+            print("[ProTerm][PTY] ERROR: posix_spawn failed with code \(spawnResult) for \(command)")
+            #endif
             fatalError("posix_spawn failed: \\(spawnResult)")
         }
         childPID = pid
+        #if DEBUG
+        print("[ProTerm][PTY] Process spawned successfully, PID: \(pid), masterFD: \(master)")
+        #endif
         // Close descriptors not needed in parent
         close(slave)
             // ---------- Parent process ----------
@@ -82,8 +122,8 @@ final class PTYWrapper {
             let flags = fcntl(masterFD, F_GETFL)
             _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
 
-            // Start asynchronous reading
-            beginReading()
+            // Don't start reading here - wait for startReading() to be called
+            // This ensures onOutput handler is set before we start reading
             // Free duplicated C strings allocated with strdup
             for ptr in cArgs where ptr != nil {
                 free(ptr)
@@ -103,7 +143,20 @@ final class PTYWrapper {
 
     // MARK: - Reading
     private func beginReading() {
-        guard masterFD != -1 else { return }
+        guard masterFD != -1 else {
+            #if DEBUG
+            print("[ProTerm][PTY] beginReading: masterFD is -1, cannot start reading")
+            #endif
+            return
+        }
+        // Cancel any existing read source to avoid duplicates
+        readSource?.cancel()
+        readSource = nil
+        
+        #if DEBUG
+        print("[ProTerm][PTY] Starting read loop for masterFD: \(masterFD), childPID: \(childPID)")
+        #endif
+        
         let queue = DispatchQueue(label: "com.proterm.pty.read")
         readSource = DispatchSource.makeReadSource(fileDescriptor: masterFD, queue: queue)
         readSource?.setEventHandler { [weak self] in
@@ -113,11 +166,26 @@ final class PTYWrapper {
             if bytes > 0 {
                 let data = Data(buffer[0..<bytes])
                 if let str = String(data: data, encoding: .utf8) {
+                    #if DEBUG
+                    print("[ProTerm][PTY] Read \(bytes) bytes from masterFD \(self.masterFD): \(str.prefix(50))")
+                    #endif
                     self.onOutput?(str)
+                } else {
+                    #if DEBUG
+                    print("[ProTerm][PTY] Failed to decode \(bytes) bytes as UTF-8")
+                    #endif
                 }
             } else if bytes == 0 {
                 // EOF – child exited
+                #if DEBUG
+                print("[ProTerm][PTY] EOF received on masterFD \(self.masterFD), child process exited")
+                #endif
                 self.stop()
+            } else {
+                // Error reading
+                #if DEBUG
+                print("[ProTerm][PTY] Error reading from masterFD \(self.masterFD): errno=\(errno)")
+                #endif
             }
         }
         readSource?.setCancelHandler { [weak self] in
@@ -126,12 +194,18 @@ final class PTYWrapper {
             }
         }
         readSource?.resume()
+        #if DEBUG
+        print("[ProTerm][PTY] Read source resumed for masterFD: \(masterFD)")
+        #endif
     }
 
     // MARK: - Public I/O
     /// Write a string to the PTY (e.g. user keystrokes).
     /// Public method to start reading PTY output with a handler.
     public func startReading(_ handler: @escaping (String) -> Void) {
+        #if DEBUG
+        print("[ProTerm][PTY] startReading called for masterFD: \(masterFD), childPID: \(childPID)")
+        #endif
         // Assign the closure to be called on each output chunk.
         self.onOutput = handler
         // Begin the internal read loop.
@@ -139,11 +213,23 @@ final class PTYWrapper {
     }
     
     func write(_ string: String) {
-        guard masterFD != -1 else { return }
+        guard masterFD != -1 else {
+            #if DEBUG
+            print("[ProTerm][PTY] write failed: masterFD is -1")
+            #endif
+            return
+        }
         if let data = string.data(using: .utf8) {
-            _ = data.withUnsafeBytes { ptr in
+            let written = data.withUnsafeBytes { ptr in
                 Darwin.write(masterFD, ptr.baseAddress!, data.count)
             }
+            #if DEBUG
+            print("[ProTerm][PTY] write called: '\(string.prefix(20))', wrote \(written) bytes to masterFD \(masterFD)")
+            #endif
+        } else {
+            #if DEBUG
+            print("[ProTerm][PTY] write failed: could not convert string to UTF-8")
+            #endif
         }
     }
 
@@ -221,8 +307,8 @@ final class PTYWrapper {
         let flags = fcntl(masterFD, F_GETFL)
         _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
         
-        // Start asynchronous reading
-        beginReading()
+        // Don't start reading here - wait for startReading() to be called
+        // This ensures onOutput handler is set before we start reading
     }
     deinit {
         stop()

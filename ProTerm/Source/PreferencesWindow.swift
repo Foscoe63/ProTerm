@@ -32,7 +32,11 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         self.contentView = content
         self.onClose = onClose
         if window != nil {
-            updateWindowContent()
+            // Defer content view update to avoid reentrant layout warnings
+            // This ensures the update happens after the current layout pass completes
+            DispatchQueue.main.async { [weak self] in
+                self?.updateWindowContent()
+            }
         }
     }
     
@@ -112,10 +116,17 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     
     private func updateWindowContent() {
         guard let content = contentView, let window = window else { return }
+        // Ensure we're not updating during a layout pass
+        // Use the existing hosting view's frame if available, otherwise use window bounds
+        let existingFrame = hostingView?.frame ?? window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 800, height: 600)
         let hostingView = NSHostingView(rootView: content)
-        hostingView.frame = window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 800, height: 600)
-        window.contentView = hostingView
-        self.hostingView = hostingView
+        hostingView.frame = existingFrame
+        // Defer the actual content view assignment to avoid reentrant layout
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self = self, let window = window else { return }
+            window.contentView = hostingView
+            self.hostingView = hostingView
+        }
     }
     
     func windowWillClose(_ notification: Notification) {
@@ -232,7 +243,11 @@ class SSHEditWindowController: NSWindowController, NSWindowDelegate {
         self.contentView = content
         self.onClose = onClose
         if window != nil {
-            updateWindowContent()
+            // Defer content view update to avoid reentrant layout warnings
+            // This ensures the update happens after the current layout pass completes
+            DispatchQueue.main.async { [weak self] in
+                self?.updateWindowContent()
+            }
         }
     }
     
@@ -307,10 +322,17 @@ class SSHEditWindowController: NSWindowController, NSWindowDelegate {
     
     private func updateWindowContent() {
         guard let content = contentView, let window = window else { return }
+        // Ensure we're not updating during a layout pass
+        // Use the existing hosting view's frame if available, otherwise use window bounds
+        let existingFrame = hostingView?.frame ?? window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 500, height: 500)
         let hostingView = NSHostingView(rootView: content)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 500, height: 500)
-        window.contentView = hostingView
-        self.hostingView = hostingView
+        hostingView.frame = existingFrame
+        // Defer the actual content view assignment to avoid reentrant layout
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self = self, let window = window else { return }
+            window.contentView = hostingView
+            self.hostingView = hostingView
+        }
     }
     
     func windowWillClose(_ notification: Notification) {
