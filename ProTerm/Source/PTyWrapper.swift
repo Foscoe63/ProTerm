@@ -65,9 +65,14 @@ final class PTYWrapper: @unchecked Sendable {
         }
         
         // Set window size on slave (SSH needs this)
+        // Read configured columns from UserDefaults (default: 80)
+        let defaults = UserDefaults.standard
+        let configuredColumns = defaults.object(forKey: "ProTermTerminalColumns") as? Int ?? 80
+        let columns = max(40, min(200, configuredColumns))  // Clamp to valid range
+        
         var ws = winsize()
         ws.ws_row = 24  // Default rows
-        ws.ws_col = 80  // Default columns
+        ws.ws_col = UInt16(columns)  // Use configured columns
         ws.ws_xpixel = 0
         ws.ws_ypixel = 0
         _ = ioctl(slave, TIOCSWINSZ, &ws)
@@ -267,6 +272,14 @@ final class PTYWrapper: @unchecked Sendable {
         // 4️⃣ Open the slave side
         let slave = open(slavePath, O_RDWR)
         guard slave != -1 else { throw NSError(domain: "PTYWrapper", code: 5, userInfo: [NSLocalizedDescriptionKey: "open slave failed"]) }
+        
+        // 4.5️⃣ Set window size on slave before spawning
+        var ws = winsize()
+        ws.ws_row = UInt16(rows)
+        ws.ws_col = UInt16(columns)
+        ws.ws_xpixel = 0
+        ws.ws_ypixel = 0
+        _ = ioctl(slave, TIOCSWINSZ, &ws)
         
         // 5️⃣ Spawn the process using posix_spawn
         var pid: pid_t = 0

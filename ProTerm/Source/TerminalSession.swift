@@ -36,12 +36,30 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   // Terminal width for COLUMNS environment variable
   var terminalWidth: CGFloat = 80 {
     didSet {
-      // Update COLUMNS when width changes
-      updateColumns()
+      // Only update columns from width if no preference is set
+      // Otherwise, respect the user's configured preference
+      let defaults = UserDefaults.standard
+      let hasConfiguredColumns = defaults.object(forKey: "ProTermTerminalColumns") != nil
+      if !hasConfiguredColumns {
+        updateColumns()
+      }
       // Propagate window-size changes to the PTY if active
       applyTTYSettingsIfNeeded()
     }
   }
+
+  // Character width for accurate column calculation
+  var characterWidth: CGFloat = 7.2 {
+    didSet {
+      let defaults = UserDefaults.standard
+      let hasConfiguredColumns = defaults.object(forKey: "ProTermTerminalColumns") != nil
+      if !hasConfiguredColumns {
+        updateColumns()
+      }
+      applyTTYSettingsIfNeeded()
+    }
+  }
+
   private var columns: Int = 80
 
   // Strong references for running process and I/O to ensure handlers fire
@@ -138,10 +156,10 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   private func updateColumns() {
     // Calculate columns based on terminal width
-    // Menlo 12pt font: average character width is approximately 7.2 points
-    // Account for padding (20 points total: 10 on each side)
-    let availableWidth = max(40, terminalWidth - 20)  // Minimum 40 points
-    columns = max(40, Int(availableWidth / 7.2))  // Minimum 40 columns
+    // Use the actual character width provided by the view
+    // The terminalWidth passed in already accounts for padding and line numbers
+    let availableWidth = max(40, terminalWidth)  // Minimum 40 points
+    columns = max(40, Int(availableWidth / characterWidth))  // Minimum 40 columns
   }
 
   // Ensure the output ends with exactly one newline (no prompt is appended here)
@@ -468,8 +486,9 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     self.bracketedPasteEnabled = defaults.object(forKey: IOSettingKey.bracketed) as? Bool ?? true
     self.mouseReportingEnabled = defaults.object(forKey: IOSettingKey.mouse) as? Bool ?? false
     super.init()
-    // Initialize columns based on default width
-    updateColumns()
+    // Initialize columns from UserDefaults preference (default: 80)
+    let configuredColumns = defaults.object(forKey: "ProTermTerminalColumns") as? Int ?? 80
+    self.columns = max(40, min(200, configuredColumns))  // Clamp to valid range
     // Don't add prompt to output - it's shown inline in the input area
     output = ""
     ioSettingsObserver = NotificationCenter.default.addObserver(
@@ -478,6 +497,21 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       queue: .main
     ) { [weak self] _ in
       self?.refreshIOFeatureFlags()
+    }
+
+    // Observe terminal columns preference changes
+    NotificationCenter.default.addObserver(
+      forName: .proTermTerminalColumnsDidChange,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self = self else { return }
+      let defaults = UserDefaults.standard
+      let configuredColumns = defaults.object(forKey: "ProTermTerminalColumns") as? Int ?? 80
+      self.columns = max(40, min(200, configuredColumns))
+      // Update COLUMNS environment variable for future commands
+      // Apply window size changes to active PTY if needed
+      self.applyTTYSettingsIfNeeded()
     }
 
     // Observe external PTY output (e.g., SSH sessions launched by
@@ -545,7 +579,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         strongSelf.ptyHandler = nil
       }
       strongSelf.isProcessRunning = false
-      
+
       // If this is an SSH session, reset the flag and notify IntegrationFeatures to disconnect
       if strongSelf.isSSHSession {
         strongSelf.isSSHSession = false  // Reset so prompt will show after SSH exits
@@ -554,7 +588,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
           object: strongSelf.id
         )
       }
-      
+
       let closeMaster = strongSelf.masterFD
       strongSelf.masterFD = -1
       if closeMaster >= 0 {
@@ -567,7 +601,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       strongSelf.ensureSingleTrailingNewline()
       strongSelf.isShuttingDown = false
       strongSelf.shutdownFlag.set(false)
-      
+
       // After an interactive session ends, proactively refocus the command input
       NotificationCenter.default.post(
         name: Notification.Name("ProTermFocusCommandInput"), object: strongSelf.id)
@@ -1038,7 +1072,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // Don't prompt for host key verification
     sshArgs.append("-o")
     sshArgs.append("StrictHostKeyChecking=no")
-    
+
     // REMOVED: ConnectTimeout, KeepAlive, etc. to debug timeout issue
 
     sshArgs.append(contentsOf: args)
@@ -1177,7 +1211,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   private func monitorChildProcess(pid: pid_t) {
     childExitSource?.cancel()
     #if DEBUG
-      print("[ProTerm][SSH] Setting up process monitor for PID \(pid), isSSHSession: \(isSSHSession)")
+      print(
+        "[ProTerm][SSH] Setting up process monitor for PID \(pid), isSSHSession: \(isSSHSession)")
     #endif
     let source = DispatchSource.makeProcessSource(
       identifier: pid, eventMask: .exit, queue: DispatchQueue.global(qos: .userInitiated))
@@ -1187,7 +1222,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       var status: Int32 = 0
       _ = waitpid(pid, &status, 0)
       #if DEBUG
-        print("[ProTerm][SSH] Process monitor fired for PID \(pid), isSSHSession: \(self.isSSHSession)")
+        print(
+          "[ProTerm][SSH] Process monitor fired for PID \(pid), isSSHSession: \(self.isSSHSession)")
       #endif
       DispatchQueue.main.async {
         // Verify this notification matches the current childPID
@@ -1222,7 +1258,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         self.childPID = 0
         // Ensure clean output termination (no prompt appended here)
         self.ensureSingleTrailingNewline()
-        
+
         // If this is an SSH session, notify IntegrationFeatures to disconnect
         // and reset the SSH session flag so the prompt will show again
         if self.isSSHSession {
@@ -1232,7 +1268,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
             object: self.id
           )
         }
-        
+
         // After an interactive session ends, proactively refocus the command input
         NotificationCenter.default.post(
           name: Notification.Name("ProTermFocusCommandInput"), object: self.id)
@@ -1506,4 +1542,5 @@ extension Notification.Name {
   static let terminalTitleDidChange = Notification.Name("ProTermTerminalTitleDidChange")
   static let sshPTYOutput = Notification.Name("ProTermSSHPTYOutput")
   static let sshPTYExit = Notification.Name("ProTermSSHPTYExit")
+  static let proTermTerminalColumnsDidChange = Notification.Name("ProTermTerminalColumnsDidChange")
 }

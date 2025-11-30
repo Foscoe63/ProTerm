@@ -35,6 +35,12 @@ struct TerminalView: View {
   private var pointerCellSize: CGSize {
     fontManager.characterCellSize
   }
+  
+  // Calculate text width - use full availableWidth, gap comes from outer container's horizontalPadding
+  private func preferredTextWidth(availableWidth: CGFloat) -> CGFloat {
+    // Use full availableWidth - the outer container's horizontalPadding provides the gap
+    return max(40, availableWidth)
+  }
 
   private var focusController: CommandInputFocusController { CommandInputFocusController.shared }
 
@@ -401,6 +407,14 @@ struct TerminalView: View {
         let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
       }
+      .onChange(of: fontManager.fontSize) { _, _ in
+        let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+        recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+      }
+      .onChange(of: fontManager.fontName) { _, _ in
+        let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+        recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+      }
     }
   }
 
@@ -423,6 +437,7 @@ struct TerminalView: View {
   private func recalculateTerminalWidth(totalWidth: CGFloat, lineNumberWidth: CGFloat) {
     let padding = CGFloat(themeManager.activeProfile.horizontalPadding * 2)
     let width = max(40, totalWidth - lineNumberWidth - padding)
+    session.characterWidth = fontManager.characterCellSize.width
     session.terminalWidth = width
   }
 
@@ -469,16 +484,18 @@ struct TerminalView: View {
       Group {
         if shouldUseVirtualScrolling {
           LazyVStack(alignment: .leading, spacing: 0) {
-            virtualScrolledOutput
+            virtualScrolledOutput(availableWidth: availableWidth)
             commandInputArea
             Color.clear.frame(height: 1).id("BOTTOM")
           }
+          .frame(maxWidth: .infinity, alignment: .leading)
         } else {
           VStack(alignment: .leading, spacing: 0) {
-            outputLineWithNumbers
+            outputLineWithNumbers(availableWidth: availableWidth)
             commandInputArea
             Color.clear.frame(height: 1).id("BOTTOM")
           }
+          .frame(maxWidth: .infinity, alignment: .leading)
         }
       }
     }
@@ -541,7 +558,10 @@ struct TerminalView: View {
   }
 
   @ViewBuilder
-  private var outputLineWithNumbers: some View {
+  private func outputLineWithNumbers(availableWidth: CGFloat) -> some View {
+    let lineNumberWidth: CGFloat = lineNumbersManager.showLineNumbers ? 29.0 : 0.0  // 23 + 6 padding
+    let textWidth = availableWidth - lineNumberWidth
+    
     HStack(alignment: .firstTextBaseline, spacing: 0) {
       if lineNumbersManager.showLineNumbers {
         LineNumbersView(attributedText: highlightedAttributedOutput, font: fontManager.font)
@@ -551,7 +571,8 @@ struct TerminalView: View {
           .padding(.trailing, 6)
           .padding(.vertical, 4)
       }
-      terminalOutputText
+      terminalOutputText(availableWidth: availableWidth)
+        .frame(width: textWidth, alignment: .leading)
     }
   }
 
@@ -705,8 +726,8 @@ struct TerminalView: View {
           }
         }
       }
-      .padding(.leading, lineNumbersManager.showLineNumbers ? 0 : 10)
-      .padding(.trailing, 10)
+      .padding(.leading, lineNumbersManager.showLineNumbers ? 0 : CGFloat(themeManager.activeProfile.horizontalPadding))
+      .padding(.trailing, CGFloat(themeManager.activeProfile.horizontalPadding))
       .padding(.vertical, 4)
       .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -967,12 +988,14 @@ struct TerminalView: View {
 
   // MARK: - Terminal Output Text View
 
-  private var terminalOutputText: some View {
+  @ViewBuilder
+  private func terminalOutputText(availableWidth: CGFloat) -> some View {
     Text(highlightedAttributedOutput)
       .textSelection(.enabled)
       .frame(maxWidth: .infinity, alignment: .leading)
+      .fixedSize(horizontal: false, vertical: true)  // Allow horizontal expansion, prevent vertical
       .padding(.leading, lineNumbersManager.showLineNumbers ? 0 : 10)
-      .padding(.trailing, 10)
+      .padding(.trailing, 0)
       .padding(.vertical, 4)
       .font(fontManager.font)
       .foregroundColor(themeManager.current.foreground)
@@ -997,8 +1020,11 @@ struct TerminalView: View {
 
   // Virtual scrolled output - splits into lines for LazyVStack
   @ViewBuilder
-  private var virtualScrolledOutput: some View {
+  private func virtualScrolledOutput(availableWidth: CGFloat) -> some View {
     let lines = splitOutputIntoLines()
+    let lineNumberWidth: CGFloat = lineNumbersManager.showLineNumbers ? 29.0 : 0.0  // 23 + 6 padding
+    let textWidth = availableWidth - lineNumberWidth
+    
     ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
       HStack(alignment: .firstTextBaseline, spacing: 0) {
         if lineNumbersManager.showLineNumbers {
@@ -1010,9 +1036,10 @@ struct TerminalView: View {
             .padding(.vertical, 4)
         }
         Text(line)
-          .frame(maxWidth: .infinity, alignment: .leading)
+          .frame(width: textWidth, alignment: .leading)
+          .fixedSize(horizontal: false, vertical: true)
           .padding(.leading, lineNumbersManager.showLineNumbers ? 0 : 10)
-          .padding(.trailing, 10)
+          .padding(.trailing, 0)
           .padding(.vertical, 4)
           .font(fontManager.font)
           .foregroundColor(themeManager.current.foreground)

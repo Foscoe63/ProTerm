@@ -59,7 +59,7 @@ struct AppearanceProfile: Identifiable, Codable, Equatable {
         backgroundMaterial: BackgroundMaterial = .solid,
         backgroundOpacity: Double = 1.0,
         cornerRadius: Double = 12,
-        horizontalPadding: Double = 18,
+        horizontalPadding: Double = 8,
         verticalPadding: Double = 14,
         kind: Kind = .custom
     ) {
@@ -106,7 +106,7 @@ extension AppearanceProfile {
             backgroundMaterial: .solid,
             backgroundOpacity: 1.0,
             cornerRadius: 8,
-            horizontalPadding: 16,
+            horizontalPadding: 8,
             verticalPadding: 12,
             kind: .builtIn
         ),
@@ -122,7 +122,7 @@ extension AppearanceProfile {
             backgroundMaterial: .vibrantDark,
             backgroundOpacity: 0.75,
             cornerRadius: 14,
-            horizontalPadding: 20,
+            horizontalPadding: 8,
             verticalPadding: 16,
             kind: .builtIn
         ),
@@ -138,7 +138,7 @@ extension AppearanceProfile {
             backgroundMaterial: .vibrantDark,
             backgroundOpacity: 0.8,
             cornerRadius: 18,
-            horizontalPadding: 22,
+            horizontalPadding: 8,
             verticalPadding: 18,
             kind: .builtIn
         ),
@@ -154,7 +154,7 @@ extension AppearanceProfile {
             backgroundMaterial: .translucent,
             backgroundOpacity: 0.9,
             cornerRadius: 16,
-            horizontalPadding: 22,
+            horizontalPadding: 8,
             verticalPadding: 16,
             kind: .builtIn
         ),
@@ -170,7 +170,7 @@ extension AppearanceProfile {
             backgroundMaterial: .solid,
             backgroundOpacity: 0.95,
             cornerRadius: 14,
-            horizontalPadding: 20,
+            horizontalPadding: 8,
             verticalPadding: 16,
             kind: .builtIn
         ),
@@ -186,7 +186,7 @@ extension AppearanceProfile {
             backgroundMaterial: .translucent,
             backgroundOpacity: 0.85,
             cornerRadius: 18,
-            horizontalPadding: 24,
+            horizontalPadding: 8,
             verticalPadding: 18,
             kind: .builtIn
         ),
@@ -202,7 +202,7 @@ extension AppearanceProfile {
             backgroundMaterial: .solid,
             backgroundOpacity: 1.0,
             cornerRadius: 12,
-            horizontalPadding: 18,
+            horizontalPadding: 8,
             verticalPadding: 12,
             kind: .builtIn
         ),
@@ -218,7 +218,7 @@ extension AppearanceProfile {
             backgroundMaterial: .translucent,
             backgroundOpacity: 0.92,
             cornerRadius: 20,
-            horizontalPadding: 26,
+            horizontalPadding: 8,
             verticalPadding: 18,
             kind: .builtIn
         )

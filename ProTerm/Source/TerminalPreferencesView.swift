@@ -6,6 +6,7 @@ struct TerminalPreferencesView: View {
     @EnvironmentObject var shellManager: ShellManager
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var visualSettings: TerminalVisualSettings
+    @AppStorage("ProTermTerminalColumns") private var terminalColumns: Int = 80
     @State private var isTestingBell = false
     
     var body: some View {
@@ -34,6 +35,44 @@ struct TerminalPreferencesView: View {
                         .pickerStyle(.radioGroup)
                         .onChange(of: shellManager.selectedShell) { _, newShell in
                             shellManager.setShell(newShell)
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    // MARK: - Terminal Width Settings
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Terminal Width (Columns)")
+                            .font(.headline)
+                        
+                        Text("Set the number of columns for terminal output. This affects how commands like 'ls' format their output.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        HStack {
+                            Slider(value: Binding(
+                                get: { Double(terminalColumns) },
+                                set: { newValue in
+                                    terminalColumns = Int(newValue)
+                                    // Notify all sessions to update
+                                    NotificationCenter.default.post(name: .proTermTerminalColumnsDidChange, object: nil)
+                                }
+                            ), in: 40...200, step: 10)
+                            
+                            TextField("", value: Binding(
+                                get: { terminalColumns },
+                                set: { newValue in
+                                    terminalColumns = max(40, min(200, newValue))
+                                    // Notify all sessions to update
+                                    NotificationCenter.default.post(name: .proTermTerminalColumnsDidChange, object: nil)
+                                }
+                            ), format: .number)
+                                .frame(width: 60)
+                                .textFieldStyle(.roundedBorder)
+                            
+                            Text("columns")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
                     }
                     
