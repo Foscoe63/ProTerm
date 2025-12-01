@@ -116,9 +116,6 @@ final class SSHSessionManager: @unchecked Sendable {
     // -----------------------------------------------------------------
     // Launch the command via PTYWrapper.
     // -----------------------------------------------------------------
-    #if DEBUG
-      print("[ProTerm][SSH] Starting SSH connection: \(execPath) \(args.joined(separator: " "))")
-    #endif
 
     // Set up environment for SSH
     // SSH_ASKPASS: Path to helper script that will prompt for password
@@ -132,17 +129,9 @@ final class SSHSessionManager: @unchecked Sendable {
       "SSH_ASKPASS_REQUIRE": "force",
     ]
 
-    #if DEBUG
-      print("[ProTerm][SSH] Using SSH_ASKPASS: \(askpassPath)")
-    #endif
 
     let handler = PTYWrapper(command: execPath, args: args, env: sshEnv)
 
-    #if DEBUG
-      print(
-        "[ProTerm][SSH] PTYWrapper created, childPID: \(handler.childPID), masterFD: \(handler.masterFD)"
-      )
-    #endif
 
     // Get session ID for use in closures (avoid capturing session object)
     let sessionId = session.id
@@ -156,28 +145,16 @@ final class SSHSessionManager: @unchecked Sendable {
     let semaphore = DispatchSemaphore(value: 0)
 
     Task { @MainActor in
-      #if DEBUG
-        print("[ProTerm][SSH] Attaching PTY to session \(sessionId)")
-      #endif
       session.attachPTY(handler, isSSH: true)
 
-      #if DEBUG
-        print("[ProTerm][SSH] PTY attached, starting read loop for session \(sessionId)")
-      #endif
 
       handler.startReading { [sessionId] text in
-        #if DEBUG
-          print("[ProTerm][SSH] PTY output for session \(sessionId): \(text.prefix(100))")
-        #endif
         DispatchQueue.main.async {
           NotificationCenter.default.post(
             name: .sshPTYOutput, object: sessionId, userInfo: ["text": text])
         }
       }
 
-      #if DEBUG
-        print("[ProTerm][SSH] Read loop started for session \(sessionId)")
-      #endif
 
       semaphore.signal()
     }
@@ -185,9 +162,6 @@ final class SSHSessionManager: @unchecked Sendable {
     // Wait for setup to complete (with short timeout)
     _ = semaphore.wait(timeout: .now() + 1.0)
 
-    #if DEBUG
-      print("[ProTerm][SSH] SSH session setup complete for session \(sessionId)")
-    #endif
 
     // Monitor child exit – post a notification for the session so the
     // session can perform cleanup on the main actor. Avoid capturing
@@ -208,9 +182,6 @@ final class SSHSessionManager: @unchecked Sendable {
     usleep(100_000)  // 100ms
 
     if !handler.isRunning {
-      #if DEBUG
-        print("[ProTerm][SSH] ERROR: SSH process exited immediately for session \(sessionId)")
-      #endif
       monitor.cancel()
       return .failure(
         .launchFailed(

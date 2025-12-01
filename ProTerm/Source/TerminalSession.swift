@@ -101,58 +101,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     static let mouse = "ProTermMouseReporting"
   }
 
-  #if DEBUG
-    @inline(__always) private func debugLog(_ message: String) {
-      print("[ProTerm][TerminalSession] \(message)")
-    }
-
-    // MARK: - Safety: reset stale running state
-    // In rare cases after a PTY-based command (e.g., sudo) finishes, the UI may still think
-    // a process is running due to timing of handlers. This helper makes the state consistent.
-    @MainActor
-    func resetStaleProcessState() {
-      // If a Foundation.Process exists and is running, do nothing
-      if let proc = process, proc.isRunning { return }
-
-      // If we report running but there is no active PTY and no running Process, clean up
-      if isProcessRunning && !hasActivePTY {
-        // Stop readability/dispatch sources
-        outputReadHandle?.readabilityHandler = nil
-        ptyReadSource?.cancel()
-        ptyReadSource = nil
-        childExitSource?.cancel()
-        childExitSource = nil
-
-        // Close FDs if any
-        let mfd = masterFD
-        masterFD = -1
-        if mfd >= 0 {
-          DispatchQueue.global(qos: .userInitiated).async { close(mfd) }
-        }
-        let sfd = slaveFD
-        slaveFD = -1
-        if sfd >= 0 {
-          DispatchQueue.global(qos: .userInitiated).async { close(sfd) }
-        }
-
-        // Clear handler/wrapper
-        ptyHandler = nil
-        process = nil
-        inputPipe = nil
-
-        // Update flags
-        isShuttingDown = false
-        shutdownFlag.set(false)
-        childPID = 0
-        isProcessRunning = false
-
-        // Normalize trailing newline (no prompt appended here)
-        ensureSingleTrailingNewline()
-      }
-    }
-  #else
-    @inline(__always) private func debugLog(_ message: String) {}
-  #endif
+  @inline(__always) private func debugLog(_ message: String) {}
 
   private func updateColumns() {
     // Calculate columns based on terminal width
@@ -519,9 +468,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // session id as the object so we avoid sending the `TerminalSession`
     // reference into background closures.
     let sessionIdForObserver = self.id
-    #if DEBUG
-      print("[ProTerm][SSH] Setting up notification observer for session \(sessionIdForObserver)")
-    #endif
     externalPTYOutputObserver = NotificationCenter.default.addObserver(
       forName: .sshPTYOutput,
       object: nil,  // Listen to all, filter inside
@@ -533,25 +479,11 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       guard let noteSessionId = note.object as? UUID, noteSessionId == self.id else {
         return
       }
-      #if DEBUG
-        let objectDesc = note.object.map { String(describing: $0) } ?? "nil"
-        print(
-          "[ProTerm][SSH] Notification received: object=\(objectDesc), expected=\(self.id)"
-        )
-      #endif
       guard let text = note.userInfo?["text"] as? String else {
-        #if DEBUG
-          print(
-            "[ProTerm][SSH] Notification received but no text in userInfo for session \(self.id.uuidString)"
-          )
-        #endif
         return
       }
       // self is already unwrapped above
       let strongSelf = self
-      #if DEBUG
-        print("[ProTerm][SSH] Received output for session \(strongSelf.id): \(text.prefix(100))")
-      #endif
       var outputToAdd = text
       if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
         outputToAdd = "\n" + text
@@ -561,9 +493,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         strongSelf.appendOutputChunk(outputToAdd)
       }
     }
-    #if DEBUG
-      print("[ProTerm][SSH] Notification observer set up for session \(sessionIdForObserver)")
-    #endif
 
     externalPTYExitObserver = NotificationCenter.default.addObserver(
       forName: .sshPTYExit,
@@ -1043,11 +972,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // Check if user explicitly provided a key file in args
     let hasExplicitKey = args.contains("-i") || args.contains("--identity-file")
 
-    #if DEBUG
-      print(
-        "[ProTerm][SSH] runSSHCommandDirect called with args: \(args), hasExplicitKey: \(hasExplicitKey)"
-      )
-    #endif
 
     if !hasExplicitKey {
       // FORCE password-only authentication
@@ -1077,9 +1001,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
     sshArgs.append(contentsOf: args)
 
-    #if DEBUG
-      print("[ProTerm][SSH] Final SSH command: /usr/bin/ssh \(sshArgs.joined(separator: " "))")
-    #endif
 
     // Set up environment for SSH
     // SSH_ASKPASS: Path to helper script that will prompt for password
@@ -1093,9 +1014,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       "SSH_ASKPASS_REQUIRE": "force",  // Force use of SSH_ASKPASS even if we have a terminal
     ]
 
-    #if DEBUG
-      print("[ProTerm][SSH] Using SSH_ASKPASS: \(askpassPath)")
-    #endif
 
     let handler = PTYWrapper(command: "/usr/bin/ssh", args: sshArgs, env: sshEnv)
 
@@ -1210,10 +1128,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   private func monitorChildProcess(pid: pid_t) {
     childExitSource?.cancel()
-    #if DEBUG
-      print(
-        "[ProTerm][SSH] Setting up process monitor for PID \(pid), isSSHSession: \(isSSHSession)")
-    #endif
     let source = DispatchSource.makeProcessSource(
       identifier: pid, eventMask: .exit, queue: DispatchQueue.global(qos: .userInitiated))
     source.setEventHandler { [weak self] in
@@ -1221,10 +1135,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       self.debugLog("Child process \(pid) exited")
       var status: Int32 = 0
       _ = waitpid(pid, &status, 0)
-      #if DEBUG
-        print(
-          "[ProTerm][SSH] Process monitor fired for PID \(pid), isSSHSession: \(self.isSSHSession)")
-      #endif
       DispatchQueue.main.async {
         // Verify this notification matches the current childPID
         // This prevents a stale handler from clearing state if a new process started immediately
@@ -1283,29 +1193,16 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   // Required compatibility methods
   public func sendInput(_ input: String) {
-    #if DEBUG
-      print(
-        "[ProTerm][SSH] sendInput called: '\(input.prefix(50))' for session \(id), hasHandler: \(ptyHandler != nil), masterFD: \(masterFD)"
-      )
-    #endif
     if let handler = ptyHandler {
       handler.write(input)
       return
     }
     guard masterFD >= 0, let data = input.data(using: .utf8) else {
-      #if DEBUG
-        print(
-          "[ProTerm][SSH] sendInput failed: masterFD=\(masterFD), data=\(input.data(using: .utf8) != nil)"
-        )
-      #endif
       return
     }
     data.withUnsafeBytes { buffer in
       guard let base = buffer.baseAddress else { return }
       let written = Darwin.write(masterFD, base, data.count)
-      #if DEBUG
-        print("[ProTerm][SSH] Wrote \(written) bytes to masterFD \(masterFD)")
-      #endif
     }
   }
 
@@ -1314,25 +1211,11 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // Consider PTY active only while the session is running and the FD is valid
     if let handler = ptyHandler {
       let result = isProcessRunning && handler.isRunning
-      #if DEBUG
-        if result {
-          print(
-            "[ProTerm][SSH] hasActivePTY=true: handler exists, isRunning=\(handler.isRunning), isProcessRunning=\(isProcessRunning)"
-          )
-        }
-      #endif
       return result
     }
     let pidAlive = isPIDAlive(childPID)
     let fdOk = masterFD >= 0 && isFDValid(masterFD)
     let result = isProcessRunning && childPID > 0 && pidAlive && fdOk
-    #if DEBUG
-      if result {
-        print(
-          "[ProTerm][SSH] hasActivePTY=true: no handler, but masterFD=\(masterFD), childPID=\(childPID), pidAlive=\(pidAlive), fdOk=\(fdOk)"
-        )
-      }
-    #endif
     return result
   }
 

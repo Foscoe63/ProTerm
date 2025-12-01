@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/ProTerm.iml" filepath="$PROJECT_DIR$/.idea/ProTerm.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/ProTermXcode.iml" filepath="$PROJECT_DIR$/.idea/ProTermXcode.iml" />
     </modules>
   </component>
 </project>

@@ -28,16 +28,10 @@ final class PTYWrapper: @unchecked Sendable {
     ///   - args: Arguments passed to the command.
     ///   - env: Optional environment dictionary.
     init(command: String, args: [String] = [], env: [String:String]? = nil) {
-        #if DEBUG
-        print("[ProTerm][PTY] Creating PTYWrapper for: \(command) \(args.joined(separator: " "))")
-        #endif
         // 1️⃣ Create master PTY
         var master: Int32 = -1
         master = posix_openpt(O_RDWR)
         guard master != -1 else {
-            #if DEBUG
-            print("[ProTerm][PTY] ERROR: posix_openpt failed")
-            #endif
             fatalError("posix_openpt failed")
         }
 
@@ -109,15 +103,9 @@ final class PTYWrapper: @unchecked Sendable {
         // Spawn
         let spawnResult = posix_spawn(&pid, command, &fileActions, nil, cArgs, env != nil ? cEnv : nil)
         if spawnResult != 0 {
-            #if DEBUG
-            print("[ProTerm][PTY] ERROR: posix_spawn failed with code \(spawnResult) for \(command)")
-            #endif
             fatalError("posix_spawn failed: \\(spawnResult)")
         }
         childPID = pid
-        #if DEBUG
-        print("[ProTerm][PTY] Process spawned successfully, PID: \(pid), masterFD: \(master)")
-        #endif
         // Close descriptors not needed in parent
         close(slave)
             // ---------- Parent process ----------
@@ -149,18 +137,12 @@ final class PTYWrapper: @unchecked Sendable {
     // MARK: - Reading
     private func beginReading() {
         guard masterFD != -1 else {
-            #if DEBUG
-            print("[ProTerm][PTY] beginReading: masterFD is -1, cannot start reading")
-            #endif
             return
         }
         // Cancel any existing read source to avoid duplicates
         readSource?.cancel()
         readSource = nil
         
-        #if DEBUG
-        print("[ProTerm][PTY] Starting read loop for masterFD: \(masterFD), childPID: \(childPID)")
-        #endif
         
         let queue = DispatchQueue(label: "com.proterm.pty.read")
         readSource = DispatchSource.makeReadSource(fileDescriptor: masterFD, queue: queue)
@@ -171,26 +153,14 @@ final class PTYWrapper: @unchecked Sendable {
             if bytes > 0 {
                 let data = Data(buffer[0..<bytes])
                 if let str = String(data: data, encoding: .utf8) {
-                    #if DEBUG
-                    print("[ProTerm][PTY] Read \(bytes) bytes from masterFD \(self.masterFD): \(str.prefix(50))")
-                    #endif
                     self.onOutput?(str)
                 } else {
-                    #if DEBUG
-                    print("[ProTerm][PTY] Failed to decode \(bytes) bytes as UTF-8")
-                    #endif
                 }
             } else if bytes == 0 {
                 // EOF – child exited
-                #if DEBUG
-                print("[ProTerm][PTY] EOF received on masterFD \(self.masterFD), child process exited")
-                #endif
                 self.stop()
             } else {
                 // Error reading
-                #if DEBUG
-                print("[ProTerm][PTY] Error reading from masterFD \(self.masterFD): errno=\(errno)")
-                #endif
             }
         }
         readSource?.setCancelHandler { [weak self] in
@@ -199,18 +169,12 @@ final class PTYWrapper: @unchecked Sendable {
             }
         }
         readSource?.resume()
-        #if DEBUG
-        print("[ProTerm][PTY] Read source resumed for masterFD: \(masterFD)")
-        #endif
     }
 
     // MARK: - Public I/O
     /// Write a string to the PTY (e.g. user keystrokes).
     /// Public method to start reading PTY output with a handler.
     public func startReading(_ handler: @escaping (String) -> Void) {
-        #if DEBUG
-        print("[ProTerm][PTY] startReading called for masterFD: \(masterFD), childPID: \(childPID)")
-        #endif
         // Assign the closure to be called on each output chunk.
         self.onOutput = handler
         // Begin the internal read loop.
@@ -219,22 +183,13 @@ final class PTYWrapper: @unchecked Sendable {
     
     func write(_ string: String) {
         guard masterFD != -1 else {
-            #if DEBUG
-            print("[ProTerm][PTY] write failed: masterFD is -1")
-            #endif
             return
         }
         if let data = string.data(using: .utf8) {
             let written = data.withUnsafeBytes { ptr in
                 Darwin.write(masterFD, ptr.baseAddress!, data.count)
             }
-            #if DEBUG
-            print("[ProTerm][PTY] write called: '\(string.prefix(20))', wrote \(written) bytes to masterFD \(masterFD)")
-            #endif
         } else {
-            #if DEBUG
-            print("[ProTerm][PTY] write failed: could not convert string to UTF-8")
-            #endif
         }
     }
 

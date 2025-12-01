@@ -1305,14 +1305,6 @@ struct TerminalView: View {
     let recentLines = lines.suffix(5).joined(separator: "\n")
     let recentLinesLower = recentLines.lowercased()
 
-    #if DEBUG
-      if session.isSSHSession || recentLinesLower.contains("password") {
-        print("[ProTerm][PasswordDetect] Checking for password prompt")
-        print("[ProTerm][PasswordDetect] isSSHSession: \(session.isSSHSession)")
-        print("[ProTerm][PasswordDetect] isProcessRunning: \(session.isProcessRunning)")
-        print("[ProTerm][PasswordDetect] Recent output: '\(recentLines.suffix(200))'")
-      }
-    #endif
 
     // Check for sudo command in recent output (case-insensitive)
     let hasSudoCommand =
@@ -1342,16 +1334,6 @@ struct TerminalView: View {
 
     let hasPasswordPrompt = hasSudoPasswordPrompt || hasSSHPasswordPrompt
 
-    #if DEBUG
-      if session.isSSHSession || recentLinesLower.contains("password") {
-        print("[ProTerm][PasswordDetect] hasSSHSession: \(hasSSHSession)")
-        print("[ProTerm][PasswordDetect] lastLine: '\(lastLine)'")
-        print("[ProTerm][PasswordDetect] hasSudoPasswordPrompt: \(hasSudoPasswordPrompt)")
-        print("[ProTerm][PasswordDetect] hasSSHPasswordPrompt: \(hasSSHPasswordPrompt)")
-        print("[ProTerm][PasswordDetect] hasPasswordPrompt: \(hasPasswordPrompt)")
-        print("[ProTerm][PasswordDetect] showPasswordInput: \(showPasswordInput)")
-      }
-    #endif
 
     // Check if password was accepted.
     // Important: we no longer append the prompt to output, so do NOT rely on session.prompt presence.
@@ -1362,9 +1344,6 @@ struct TerminalView: View {
       // Show password input if we detect a password prompt
       if !showPasswordInput {
         showPasswordInput = true
-        #if DEBUG
-          print("[ProTerm][PasswordDetect] ✅ SHOWING PASSWORD INPUT")
-        #endif
       }
       // Force focus on password field and bring window to front
       DispatchQueue.main.async {
@@ -1388,9 +1367,6 @@ struct TerminalView: View {
       // 2. Password was accepted (prompt is gone and we see output/prompt)
       showPasswordInput = false
       passwordInput = ""
-      #if DEBUG
-        print("[ProTerm][PasswordDetect] ❌ HIDING PASSWORD INPUT")
-      #endif
       // Restore focus to command field. Even if the process is still running
       // (after successful sudo/ssh), we want the caret visible in the command line.
       DispatchQueue.main.async {
