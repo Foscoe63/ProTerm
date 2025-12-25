@@ -93,7 +93,14 @@ final class ThemeManager: ObservableObject {
     
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
-    private let iCloudStore = NSUbiquitousKeyValueStore.default
+    // Only initialize iCloud KVS when explicitly enabled to avoid entitlement errors
+    private let iCloudStore: NSUbiquitousKeyValueStore? = {
+        if FeatureFlags.iCloudSyncEnabled {
+            return NSUbiquitousKeyValueStore.default
+        } else {
+            return nil
+        }
+    }()
     private var iCloudObserver: NSObjectProtocol?
     
     init() {
@@ -355,6 +362,7 @@ final class ThemeManager: ObservableObject {
     }
     
     private func startICloudObserver() {
+        guard FeatureFlags.iCloudSyncEnabled, let iCloudStore else { return }
         guard iCloudObserver == nil else { return }
         iCloudObserver = NotificationCenter.default.addObserver(
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
@@ -379,13 +387,15 @@ final class ThemeManager: ObservableObject {
     }
     
     private func pushProfilesToICloud() {
-        guard syncProfilesToICloud, let data = try? encoder.encode(profiles) else { return }
+        guard FeatureFlags.iCloudSyncEnabled, let iCloudStore, syncProfilesToICloud,
+              let data = try? encoder.encode(profiles) else { return }
         iCloudStore.set(data, forKey: ubiquitousProfilesKey)
         iCloudStore.synchronize()
     }
     
     private func pullProfilesFromICloudIfAvailable() {
-        guard let data = iCloudStore.data(forKey: ubiquitousProfilesKey),
+        guard FeatureFlags.iCloudSyncEnabled, let iCloudStore,
+              let data = iCloudStore.data(forKey: ubiquitousProfilesKey),
               let decoded = try? decoder.decode([AppearanceProfile].self, from: data),
               !decoded.isEmpty else { return }
         profiles = Self.deduplicatedProfiles(from: decoded)

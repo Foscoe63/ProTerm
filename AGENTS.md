@@ -44,6 +44,7 @@ This file provides guidance to agents when working with code in this repository.
   
     # Code Structure
 
+  - Always use the most up to date Swift Code If not sure use context7 to get latest code
   - Use Swift's latest features and protocol-oriented programming
   - Prefer value types (structs) over classes
   - Use MVVM architecture with SwiftUI

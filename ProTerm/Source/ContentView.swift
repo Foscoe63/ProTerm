@@ -6,7 +6,6 @@ struct ContentView: View {
     @EnvironmentObject var terminalManager: TerminalManager
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var shellManager: ShellManager
-    @EnvironmentObject var lineNumbersManager: LineNumbersManager
     @EnvironmentObject var keyboardShortcutsManager: KeyboardShortcutsManager
     @EnvironmentObject var productivityTools: ProductivityTools
 

@@ -76,6 +76,19 @@ struct TerminalPreferencesView: View {
                         }
                     }
                     
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Appearance")
+                            .font(.headline)
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Show Line Numbers", isOn: $visualSettings.showLineNumbers)
+                                .toggleStyle(.switch)
+                            Text("Display vertical line numbers in the terminal output area.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
                     Divider()
                     
                     // MARK: - Cursor Settings

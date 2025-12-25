@@ -77,7 +77,7 @@ class TerminalVisualSettings: ObservableObject {
     }
     
     // MARK: - Scrollback Settings
-    @Published var scrollbackLimit: Int = 10000 {
+    @Published var scrollbackLimit: Int = 1000000 { // Increased to 1MB default
         didSet { save() }
     }
     
@@ -115,6 +115,11 @@ class TerminalVisualSettings: ObservableObject {
         didSet { save() }
     }
     
+    // MARK: - Line Numbering
+    @Published var showLineNumbers: Bool = true {
+        didSet { save() }
+    }
+    
     // MARK: - UserDefaults Keys
     private let cursorStyleKey = "ProTermCursorStyle"
     private let cursorBlinkingKey = "ProTermCursorBlinking"
@@ -129,12 +134,18 @@ class TerminalVisualSettings: ObservableObject {
     private let commandBoxOutlineColorKey = "ProTermCommandBoxOutlineColor"
     private let commandBoxOutlineWidthKey = "ProTermCommandBoxOutlineWidth"
     private let commandBoxOutlineCornerRadiusKey = "ProTermCommandBoxOutlineCornerRadius"
+    private let showLineNumbersKey = "ProTermShowLineNumbers"
+    
+    /// Flag to prevent saving during initial load
+    private var isLoading = false
     
     init() {
         load()
     }
     
     private func load() {
+        isLoading = true
+        defer { isLoading = false }
         // Load cursor settings
         if let styleString = UserDefaults.standard.string(forKey: cursorStyleKey),
            let style = CursorStyle(rawValue: styleString) {
@@ -152,7 +163,7 @@ class TerminalVisualSettings: ObservableObject {
         
         // Load scrollback settings
         scrollbackLimit = UserDefaults.standard.integer(forKey: scrollbackLimitKey)
-        if scrollbackLimit == 0 { scrollbackLimit = 10000 } // Default
+        if scrollbackLimit == 0 { scrollbackLimit = 1000000 } // Default 1MB
         scrollbackEnabled = UserDefaults.standard.object(forKey: scrollbackEnabledKey) as? Bool ?? true
         autoScroll = UserDefaults.standard.object(forKey: autoScrollKey) as? Bool ?? true
         
@@ -166,6 +177,9 @@ class TerminalVisualSettings: ObservableObject {
         
         // Load command box outline settings
         showCommandBoxOutline = UserDefaults.standard.object(forKey: showCommandBoxOutlineKey) as? Bool ?? false
+        
+        // Load line numbering settings
+        showLineNumbers = UserDefaults.standard.object(forKey: showLineNumbersKey) as? Bool ?? true
         
         // Load color components
         let red = UserDefaults.standard.double(forKey: "\(commandBoxOutlineColorKey).red")
@@ -190,6 +204,9 @@ class TerminalVisualSettings: ObservableObject {
     }
     
     private func save() {
+        // Don't save during initial load - this prevents overwriting saved values with defaults
+        guard !isLoading else { return }
+        
         UserDefaults.standard.set(cursorStyle.rawValue, forKey: cursorStyleKey)
         UserDefaults.standard.set(cursorBlinking, forKey: cursorBlinkingKey)
         UserDefaults.standard.set(bellAction.rawValue, forKey: bellActionKey)
@@ -200,6 +217,7 @@ class TerminalVisualSettings: ObservableObject {
         UserDefaults.standard.set(enableBracketedPaste, forKey: bracketedPasteKey)
         UserDefaults.standard.set(enableMouseReporting, forKey: mouseReportingKey)
         UserDefaults.standard.set(showCommandBoxOutline, forKey: showCommandBoxOutlineKey)
+        UserDefaults.standard.set(showLineNumbers, forKey: showLineNumbersKey)
         
         // Save color components
         let nsColor = NSColor(commandBoxOutlineColor)

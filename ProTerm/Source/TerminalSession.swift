@@ -23,10 +23,13 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   private var maxOutputLength: Int {
     let limit = UserDefaults.standard.integer(forKey: "ProTermScrollbackLimit")
     let enabled = UserDefaults.standard.object(forKey: "ProTermScrollbackEnabled") as? Bool ?? true
-    if enabled && limit > 0 {
-      return limit
+    
+    if enabled {
+        // Enforce a sensible minimum to prevent "single page" bugs if UserDefault is weird
+        if limit < 10000 { return 1000000 } // Default 1MB if unconfigured or too small
+        return limit
     }
-    return 50000  // Default 50KB limit
+    return 100000 // Fallback if disabled (should be enough for a few pages)
   }
   private var commandStartTime: Date?
 
@@ -95,20 +98,25 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   private var ioSettingsObserver: NSObjectProtocol?
   private var externalPTYOutputObserver: NSObjectProtocol?
   private var externalPTYExitObserver: NSObjectProtocol?
+  private var pendingCR = false // Track for cross-chunk Carriage Return handling
 
   private enum IOSettingKey {
     static let bracketed = "ProTermBracketedPaste"
     static let mouse = "ProTermMouseReporting"
   }
 
-  @inline(__always) private func debugLog(_ message: String) {}
+
 
   private func updateColumns() {
     // Calculate columns based on terminal width
     // Use the actual character width provided by the view
     // The terminalWidth passed in already accounts for padding and line numbers
     let availableWidth = max(40, terminalWidth)  // Minimum 40 points
-    columns = max(40, Int(availableWidth / characterWidth))  // Minimum 40 columns
+    let charWidth = max(1.0, characterWidth)     // Avoid division by zero
+    let calculatedColumns = Int(availableWidth / charWidth)
+    
+    // Clamp to reasonable range for a terminal
+    self.columns = max(40, min(500, calculatedColumns))
   }
 
   // Ensure the output ends with exactly one newline (no prompt is appended here)
@@ -158,7 +166,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       return
     }
     if self.masterFD >= 0 {
-      proterm_set_winsize(self.masterFD, UInt16(rows), UInt16(columns))
+      setWindowSize(fd: self.masterFD, cols: UInt16(columns), rows: UInt16(rows))
     }
   }
 
@@ -177,6 +185,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     } else if let p = process?.processIdentifier, p > 0 {
       targetPid = p
     }
+    
+    // For attached PTYs (like SSH), childPID is set. Ensure we signal it.
     if targetPid > 0 {
       _ = kill(targetPid, SIGWINCH)
     }
@@ -262,16 +272,10 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     ptyReadSource = source
     // Keep a local UTF-8 remainder buffer to avoid accessing MainActor state from this queue
     var localUTF8Remainder = Data()
-    // Prepare main-thread append closure to avoid capturing self in the read handler
+    // Prepare main-thread append closure
     let appendOnMain: (String) -> Void = { [weak self] s in
-      DispatchQueue.main.async { [weak self] in
-        guard let strongSelf = self else { return }
-        guard !strongSelf.isShuttingDown && strongSelf.masterFD >= 0 else { return }
-        var outputToAdd = s
-        if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
-          outputToAdd = "\n" + s
-        }
-        strongSelf.appendOutputChunk(outputToAdd)
+      Task { @MainActor [weak self] in
+        self?.handleOutputChunkOnMain(s)
       }
     }
 
@@ -281,46 +285,51 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         let n = read(masterFD, &buffer, buffer.count)
         if n > 0 {
           let chunkData = Data(buffer[0..<n])
-          // UTF-8 remainder handling
+          
+          // Combine with any previous remainder to handle split UTF-8 sequences
           var combined = Data()
           if !localUTF8Remainder.isEmpty { combined.append(localUTF8Remainder) }
           combined.append(chunkData)
 
           var toAppend = ""
           if let full = String(data: combined, encoding: .utf8) {
-            // Entire buffer decodes
             localUTF8Remainder.removeAll(keepingCapacity: true)
             toAppend = full
           } else {
-            // Keep up to last 4 bytes as remainder and decode the rest
+            // If decoding fails, it might be a partial multibyte character at the end
             var cut = combined.count
             let maxTail = min(4, combined.count)
             var decoded: String? = nil
+            
+            // Try to find the last valid split point
             for tail in 1...maxTail {
               let headCount = combined.count - tail
               if headCount <= 0 { break }
-              decoded = String(data: combined.prefix(headCount), encoding: .utf8)
-              if decoded != nil {
+              if let s = String(data: combined.prefix(headCount), encoding: .utf8) {
+                decoded = s
                 cut = headCount
                 break
               }
             }
-            toAppend = decoded ?? String(decoding: combined, as: UTF8.self)
-            localUTF8Remainder = combined.suffix(combined.count - cut)
+            
+            if let d = decoded {
+              toAppend = d
+              localUTF8Remainder = combined.suffix(combined.count - cut)
+            } else {
+              // Complete failure, force decode as much as possible
+              toAppend = String(decoding: combined, as: UTF8.self)
+              localUTF8Remainder.removeAll()
+            }
           }
 
-          // Append on main via prepared closure
           if !toAppend.isEmpty {
             let normalized = toAppend.precomposedStringWithCanonicalMapping
             appendOnMain(normalized)
           }
-          // Loop to drain kernel buffer; break if no more data will be available now
         } else if n == 0 {
-          // EOF
           source.cancel()
           break
         } else {
-          // Error or would block
           if errno == EAGAIN || errno == EWOULDBLOCK { break }
           source.cancel()
           break
@@ -467,30 +476,24 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // `SSHSessionManager`). The manager posts notifications with the
     // session id as the object so we avoid sending the `TerminalSession`
     // reference into background closures.
-    let sessionIdForObserver = self.id
     externalPTYOutputObserver = NotificationCenter.default.addObserver(
       forName: .sshPTYOutput,
-      object: nil,  // Listen to all, filter inside
+      object: nil,
       queue: .main
     ) { [weak self] note in
       guard let self = self else { return }
       // Filter by session ID manually to ensure we only process our own notifications
-      // This avoids potential issues with value type bridging in NotificationCenter
       guard let noteSessionId = note.object as? UUID, noteSessionId == self.id else {
         return
       }
       guard let text = note.userInfo?["text"] as? String else {
         return
       }
-      // self is already unwrapped above
-      let strongSelf = self
-      var outputToAdd = text
-      if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
-        outputToAdd = "\n" + text
-      }
-      // We're on main queue, but need to ensure MainActor isolation
+      
+      // Append chunk exactly as received - do NOT add local newlines between chunks
+      // as it breaks character-at-a-time echoing in interactive sessions.
       Task { @MainActor in
-        strongSelf.appendOutputChunk(outputToAdd)
+        self.appendOutputChunk(text)
       }
     }
 
@@ -559,16 +562,20 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
     // Prevent re-execution, but also check if process is actually still running
     if isProcessRunning {
-      // Safety check: if the process isn't actually running, reset the flag immediately
+      // Safety check: verify the process or PTY handler is still active
       var processStillRunning = false
       if let proc = process {
         processStillRunning = proc.isRunning
+      } else if let handler = ptyHandler {
+        processStillRunning = handler.isRunning
+      } else if childPID > 0 {
+        processStillRunning = isPIDAlive(childPID)
       }
 
-      // Also check if we have valid file descriptors (if not, process is definitely dead)
-      let hasValidFDs = masterFD >= 0 && slaveFD >= 0
+      // We only need a valid masterFD; slaveFD is typically closed in the parent process
+      let hasValidFD = masterFD >= 0 || (ptyHandler?.masterFD ?? -1) >= 0
 
-      if !processStillRunning || !hasValidFDs {
+      if !processStillRunning || !hasValidFD {
         // Process has terminated or FDs are invalid - clean up immediately
         isProcessRunning = false
         ptyReadHandle?.readabilityHandler = nil
@@ -626,7 +633,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
     // Handle sudo command with PTY (case-insensitive)
     if trimmed.lowercased().hasPrefix("sudo") {
-      debugLog("Invoking sudo command: \(sanitized)")
       runSudoCommand(sanitized)
       return
     }
@@ -670,226 +676,71 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       }
     }
 
-    // Run other commands (asynchronously; do NOT block the main actor)
-    let proc = Process()
+    // Run other commands via ProcessRunner (asynchronously; do NOT block the main actor)
     let shellPath = currentShellPath()
-
-    proc.executableURL = URL(fileURLWithPath: shellPath)
-    proc.arguments = ["-l", "-c", commandToRun]  // Use -l (login shell) to load .zshrc/.bash_profile
-    proc.currentDirectoryURL = cwd
-
-    // Inherit environment and force color-friendly settings similar to Terminal
-    var env = ProcessInfo.processInfo.environment
-    env["TERM"] = env["TERM"] ?? "xterm-256color"
-    // Ensure COLUMNS is set correctly for column-based output (ls, etc.)
-    // Use the calculated columns value, ensuring it's at least 80 for proper formatting
     let effectiveColumns = max(80, columns)
-    env["COLUMNS"] = "\(effectiveColumns)"
-    env["LINES"] = "24"  // Set terminal height (default)
-    env["CLICOLOR"] = "1"
-    env["CLICOLOR_FORCE"] = "1"  // make ls and others emit color even if not a TTY
-    env["LSCOLORS"] = env["LSCOLORS"] ?? "Gxfxcxdxbxegedabagacad"
-    env["GIT_PAGER"] = "cat"  // avoid paging in non-PTY
-    env["GIT_CONFIG_PARAMETERS"] = "'color.ui=always'"
-    proc.environment = env
 
-    let pipe = Pipe()
-    proc.standardOutput = pipe
-    proc.standardError = pipe
+    // Mark running and command start time
+    self.isProcessRunning = true
+    self.commandStartTime = Date()
 
-    let handle = pipe.fileHandleForReading
-
-    // Retain references so they live through the async run
-    self.process = proc
-    self.inputPipe = pipe
-    self.outputReadHandle = handle
-
-    // Stream output incrementally as it arrives
-    handle.readabilityHandler = { [weak self] fh in
-      guard let strongSelf = self else { return }
-
-      // Read all available data in a loop to drain the buffer completely
-      // This is critical for commands that produce a lot of output quickly
-      var accumulatedData = Data()
-      var hasBell = false
-
-      while true {
-        let data = fh.availableData
-        if data.isEmpty {
-          break  // No more data available
-        }
-
-        accumulatedData.append(data)
-
-        // Check for terminal bell (ASCII 7 or \a)
-        if !hasBell && data.firstIndex(of: 7) != nil {
-          hasBell = true
-        }
-      }
-
-      guard !accumulatedData.isEmpty else { return }
-
-      // Post bell notification if detected
-      if hasBell {
-        DispatchQueue.main.async {
-          NotificationCenter.default.post(
-            name: Notification.Name("ProTermTerminalBell"), object: strongSelf.id)
-        }
-      }
-
-      guard let chunk = String(data: accumulatedData, encoding: .utf8), !chunk.isEmpty else {
-        return
-      }
-
-      DispatchQueue.main.async {
-        var outputToAdd = chunk
-        if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
-          outputToAdd = "\n" + chunk
-        }
-        strongSelf.appendOutputChunk(outputToAdd)
-      }
-    }
-
-    proc.terminationHandler = { [weak self] _ in
-      guard let strongSelf = self else { return }
-
-      // Don't stop the readability handler immediately - let it continue reading
-      // We'll stop it after we've confirmed all data is read
-      weak var weakSelf = strongSelf
-
-      // Wait a moment for any final output to arrive through the readability handler
-      Task.detached(priority: .userInitiated) {
-        // Give the readability handler time to process any final buffered data
-        try? await Task.sleep(for: .milliseconds(200))
-
-        // Now read any remaining data that the handler might have missed
-        var remainingData = Data()
-        var emptyReads = 0
-        let maxEmptyReads = 30  // Increased from 10 to 30 for commands with lots of output
-
-        while emptyReads < maxEmptyReads {
-          let chunk = handle.availableData
-          if chunk.isEmpty {
-            emptyReads += 1
-            // Progressive delay - longer waits as we get more empty reads
-            if emptyReads < maxEmptyReads {
-              let delay = min(emptyReads * 10, 100)  // Up to 100ms delay
-              try? await Task.sleep(for: .milliseconds(delay))
-            }
-          } else {
-            emptyReads = 0  // Reset counter when we get data
-            remainingData.append(chunk)
+    let runner = ProcessRunner()
+    _ = runner.run(
+      shellPath: shellPath,
+      command: commandToRun,
+      cwd: cwd,
+      columns: effectiveColumns,
+      rows: 24,
+      onOutput: { [weak self] chunk in
+        Task { @MainActor [weak self] in
+          guard let self = self else { return }
+          var outputToAdd = chunk
+          if !self.output.hasSuffix("\n") && !self.output.isEmpty {
+            outputToAdd = "\n" + chunk
           }
+          self.appendOutputChunk(outputToAdd)
         }
-
-        // Stop the readability handler now that we've drained everything
-        await MainActor.run { [weakSelf] in
-          weakSelf?.outputReadHandle?.readabilityHandler = nil
-        }
-
-        // Final read to get absolutely everything that might be buffered
-        // Wait a bit more to ensure the process has fully flushed
-        try? await Task.sleep(for: .milliseconds(150))
-
-        let finalChunk = handle.readDataToEndOfFile()
-        if !finalChunk.isEmpty {
-          remainingData.append(finalChunk)
-        }
-
-        // Update UI on main thread
-        if !remainingData.isEmpty,
-          let remainingString = String(data: remainingData, encoding: .utf8),
-          !remainingString.isEmpty
-        {
-          let outputToAdd = remainingString
-          // Check weakSelf before entering MainActor context
-          guard weakSelf != nil else { return }
-          await MainActor.run { [weakSelf] in
-            guard let strongSelf = weakSelf else { return }
-            // Ensure output starts on a new line if command is still on the same line
-            var finalOutputToAdd = outputToAdd
-            if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
-              // Command is still on the same line, add newline before output
-              finalOutputToAdd = "\n" + outputToAdd
-            }
-            var currentOutput = strongSelf.output
-            while currentOutput.hasSuffix("\n") || currentOutput.hasSuffix("\r\n") {
-              if currentOutput.hasSuffix("\r\n") {
-                currentOutput = String(currentOutput.dropLast(2))
-              } else {
-                currentOutput = String(currentOutput.dropLast(1))
-              }
-            }
-            strongSelf.output = currentOutput
-            strongSelf.appendOutputChunk(finalOutputToAdd)
+      },
+      onBell: { [weak self] in
+        guard let self = self else { return }
+        NotificationCenter.default.post(
+          name: Notification.Name("ProTermTerminalBell"), object: self.id)
+      },
+      onComplete: { [weak self] in
+        Task { @MainActor [weak self] in
+          guard let self = self else { return }
+          self.isProcessRunning = false
+          if let startTime = self.commandStartTime {
+            self.lastCommandExecutionTime = Date().timeIntervalSince(startTime)
+            self.commandStartTime = nil
           }
+          self.ensureSingleTrailingNewline()
         }
-
-        // Check weakSelf before entering MainActor context
-        guard weakSelf != nil else { return }
-        await MainActor.run { [weakSelf] in
-          guard let strongSelf = weakSelf else { return }
-          strongSelf.isProcessRunning = false
-          // Calculate execution time
-          if let startTime = strongSelf.commandStartTime {
-            strongSelf.lastCommandExecutionTime = Date().timeIntervalSince(startTime)
-            strongSelf.commandStartTime = nil
-          }
-          strongSelf.ensureSingleTrailingNewline()
-          // Release retained resources
-          strongSelf.outputReadHandle = nil
-          strongSelf.inputPipe = nil
-          strongSelf.process = nil
-        }
-      }
-    }
-
-    do {
-      self.isProcessRunning = true
-      try proc.run()
-
-      // Safety check: verify process is still running after a delay
-      // This ensures isProcessRunning is reset even if terminationHandler doesn't fire
-      DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-        DispatchQueue.main.async {
-          guard let strongSelf = self else { return }
-          if strongSelf.isProcessRunning {
-            if let proc = strongSelf.process, !proc.isRunning {
-              // Process finished but handler didn't fire - reset manually
-              strongSelf.isProcessRunning = false
-              strongSelf.ensureSingleTrailingNewline()
+      },
+      onError: { [weak self] error in
+        Task { @MainActor [weak self] in
+          guard let self = self else { return }
+          ErrorHandler.shared.logError(
+            message: "Failed to execute command: \(sanitized)",
+            type: .commandExecution,
+            command: sanitized,
+            sessionId: self.id
+          )
+          // Ensure current output line ends, then append the error
+          var current = self.output
+          while current.hasSuffix("\n") || current.hasSuffix("\r\n") || current.hasSuffix("\r") {
+            if current.hasSuffix("\r\n") {
+              current = String(current.dropLast(2))
+            } else {
+              current = String(current.dropLast(1))
             }
           }
+          self.output = current
+          self.appendOutputChunk("\nError: \(error.localizedDescription)\n")
+          self.isProcessRunning = false
         }
       }
-    } catch {
-      // Enhanced error handling
-      Task { @MainActor in
-        ErrorHandler.shared.logError(
-          message: "Failed to execute command: \(sanitized)",
-          type: .commandExecution,
-          command: sanitized,
-          sessionId: self.id
-        )
-      }
-      handle.readabilityHandler = nil
-      self.isProcessRunning = false
-      // Ensure current output line ends, then append the error and a single newline (no prompt)
-      var current = self.output
-      while current.hasSuffix("\n") || current.hasSuffix("\r\n") || current.hasSuffix("\r") {
-        if current.hasSuffix("\r\n") {
-          current = String(current.dropLast(2))
-        } else {
-          current = String(current.dropLast(1))
-        }
-      }
-      self.output = current
-      self.appendOutputChunk("\nError: \(error.localizedDescription)\n")
-      // Release retained resources
-      self.outputReadHandle = nil
-      self.inputPipe = nil
-      self.process = nil
-    }
+    )
   }
 
   @MainActor
@@ -919,7 +770,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       self.cwd = newURL
     } else {
       // Enhanced error handling
-      Task { @MainActor in
+      DispatchQueue.main.async {
         ErrorHandler.shared.logError(
           message: "cd: \(path): No such file or directory",
           type: .fileSystem,
@@ -944,103 +795,80 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     let isSSHCommand = trimmedCommand.hasPrefix("ssh ") || trimmedCommand.hasPrefix("SSH ")
 
     if isSSHCommand {
-      // Parse SSH command to extract arguments
+      // Parse SSH command and build direct execution args
       let parts = trimmedCommand.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-      guard parts.count > 0 else {
-        appendOutputChunk("\nError: Invalid SSH command\n")
+      
+      var sshArgs = ["/usr/bin/ssh", "-tt"]
+      // Inject standard compatibility flags for Cisco / legacy gear
+      sshArgs.append(contentsOf: [
+        "-o", "PreferredAuthentications=password,keyboard-interactive",
+        "-o", "PubkeyAuthentication=no",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "NumberOfPasswordPrompts=3",
+        "-o", "KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1",
+        "-o", "HostKeyAlgorithms=+ssh-rsa",
+        "-o", "Ciphers=+aes128-cbc,3des-cbc,aes256-cbc"
+      ])
+      
+      // Add user's original arguments (skip "ssh")
+      sshArgs.append(contentsOf: parts.dropFirst())
+      
+      
+      // Setup C-style args
+      let cArgs = sshArgs.map { strdup($0) }
+      let argvPointers: [UnsafeMutablePointer<CChar>?] = cArgs.map { $0 } + [nil]
+      
+      // Environment
+      let envVars = ["TERM": "xterm"]
+      let cEnvStrings = envVars.map { strdup("\($0.key)=\($0.value)") }
+      let envPointers: [UnsafeMutablePointer<CChar>?] = cEnvStrings.map { $0 } + [nil]
+      
+      var master: Int32 = -1
+      
+      let pid = argvPointers.withUnsafeBufferPointer { argvBuf in
+        envPointers.withUnsafeBufferPointer { envvBuf in
+          proterm_forkpty_exec("/usr/bin/ssh", 
+                               UnsafeMutablePointer(mutating: argvBuf.baseAddress),
+                               UnsafeMutablePointer(mutating: envvBuf.baseAddress),
+                               &master, UInt16(rows), UInt16(columns))
+        }
+      }
+      
+      // Cleanup C strings after exec finishes
+      for ptr in cArgs { free(ptr) }
+      for ptr in cEnvStrings { free(ptr) }
+      
+      guard pid > 0, master >= 0 else {
+        appendOutputChunk("\nError: Failed to start SSH session\n")
         return
       }
-
-      // Extract SSH arguments (everything after "ssh")
-      let sshArgs = Array(parts.dropFirst())
-
-      // Run SSH directly, not through shell
-      runSSHCommandDirect(args: sshArgs)
+      
+      self.masterFD = master
+      self.childPID = pid
+      self.isProcessRunning = true
+      self.isSSHSession = true
+      
+      // Set PTY to non-blocking mode
+      setNonBlocking(master)
+      
+      // Set window size for the PTY (important for SSH)
+      // Note: We don't set raw mode here - SSH will configure the TTY as needed
+      setWindowSize(fd: master, cols: UInt16(columns), rows: UInt16(rows))
+      
+      // Monitor the child process to detect when it exits
+      monitorChildProcess(pid: pid)
+      
+      // Start reading from PTY
+      startPTYReadSource(masterFD: master)
     } else {
-      // Use PTY for other interactive commands via forkpty-based spawn
-      runPTYCommandSimple(command)
+      // Use PTY for other interactive commands via shell
+      runPTYCommandWithHelper(command)
     }
   }
 
-  @MainActor
-  private func runSSHCommandDirect(args: [String]) {
-    // Run SSH directly using PTYWrapper, similar to SSHSessionManager
-    // This ensures proper PTY handling for SSH connections
-    // Add -tt flag to force PTY allocation on remote side
-    var sshArgs = ["-tt"]
-
-    // Check if user explicitly provided a key file in args
-    let hasExplicitKey = args.contains("-i") || args.contains("--identity-file")
 
 
-    if !hasExplicitKey {
-      // FORCE password-only authentication
-      // The issue is SSH tries too many keys and hits MaxAuthTries before password
-      sshArgs.append("-o")
-      sshArgs.append("PubkeyAuthentication=no")
-      sshArgs.append("-o")
-      sshArgs.append("PreferredAuthentications=keyboard-interactive,password")
-      sshArgs.append("-o")
-      sshArgs.append("IdentityFile=/dev/null")  // Don't try any key files
-      sshArgs.append("-o")
-      sshArgs.append("IdentitiesOnly=yes")  // Only use explicitly specified identities
-    } else {
-      // User provided a key
-      sshArgs.append("-o")
-      sshArgs.append("PreferredAuthentications=publickey,keyboard-interactive,password")
-    }
 
-    // Ensure interactive mode for password prompts
-    sshArgs.append("-o")
-    sshArgs.append("BatchMode=no")
-    // Don't prompt for host key verification
-    sshArgs.append("-o")
-    sshArgs.append("StrictHostKeyChecking=no")
-
-    // REMOVED: ConnectTimeout, KeepAlive, etc. to debug timeout issue
-
-    sshArgs.append(contentsOf: args)
-
-
-    // Set up environment for SSH
-    // SSH_ASKPASS: Path to helper script that will prompt for password
-    // DISPLAY: Required for SSH_ASKPASS to work (even though we're not using X11)
-    // TERM: Terminal type
-    let askpassPath = Bundle.main.path(forResource: "ssh-askpass", ofType: "sh") ?? ""
-    let sshEnv = [
-      "TERM": "xterm-256color",
-      "SSH_ASKPASS": askpassPath,
-      "DISPLAY": ":0",  // Required for SSH_ASKPASS
-      "SSH_ASKPASS_REQUIRE": "force",  // Force use of SSH_ASKPASS even if we have a terminal
-    ]
-
-
-    let handler = PTYWrapper(command: "/usr/bin/ssh", args: sshArgs, env: sshEnv)
-
-    // Store the PTY handler and mark as SSH session
-    // Use attachPTY to properly set up the session (even though handler is already created)
-    // This ensures all session state is consistent
-    self.ptyHandler = handler
-    self.masterFD = handler.masterFD
-    self.attachPTY(handler, isSSH: true)
-
-    // Monitor the child process
-    monitorChildProcess(pid: handler.childPID)
-
-    // Start reading PTY output - this must be called after attachPTY
-    handler.startReading { [weak self] text in
-      Task { @MainActor [weak self] in
-        guard let strongSelf = self else { return }
-        var outputToAdd = text
-        if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
-          outputToAdd = "\n" + text
-        }
-        strongSelf.appendOutputChunk(outputToAdd)
-      }
-    }
-
-    // Don't configure IO features for SSH - they interfere with the connection
-  }
 
   @MainActor
   private func runSudoCommand(_ command: String) {
@@ -1101,12 +929,10 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   @MainActor
   private func runPTYCommandWithHelper(_ command: String) {
-    debugLog("runPTYCommandWithHelper start: \(command)")
     let shellPath = currentShellPath()
     var master: Int32 = -1
     let pid = proterm_forkpty_spawn(shellPath, command, &master, UInt16(rows), UInt16(columns))
     guard pid > 0, master >= 0 else {
-      debugLog("proterm_forkpty_spawn failed")
       self.appendOutputChunk("\nError: Failed to start PTY session\n")
       return
     }
@@ -1132,14 +958,12 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       identifier: pid, eventMask: .exit, queue: DispatchQueue.global(qos: .userInitiated))
     source.setEventHandler { [weak self] in
       guard let self = self else { return }
-      self.debugLog("Child process \(pid) exited")
       var status: Int32 = 0
       _ = waitpid(pid, &status, 0)
       DispatchQueue.main.async {
         // Verify this notification matches the current childPID
         // This prevents a stale handler from clearing state if a new process started immediately
         guard self.childPID == pid else {
-          self.debugLog("Ignoring stale exit for PID \(pid) (current: \(self.childPID))")
           return
         }
 
@@ -1203,6 +1027,15 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     data.withUnsafeBytes { buffer in
       guard let base = buffer.baseAddress else { return }
       let written = Darwin.write(masterFD, base, data.count)
+      if written < 0 {
+        // Write failed
+      } else {
+        // Ensure the write is complete - for PTYs, the write should be immediate
+        // but we verify it completed successfully
+        if written != data.count {
+          // Partial write
+        }
+      }
     }
   }
 
@@ -1254,20 +1087,9 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     self.process = nil
     self.isSSHSession = isSSH
 
-    // Configure PTY window size using TIOCSWINSZ ioctl
+    // Configure PTY window size and notify process
     if masterFD >= 0 {
-      struct winsize {
-        var ws_row: UInt16 = 0
-        var ws_col: UInt16 = 0
-        var ws_xpixel: UInt16 = 0
-        var ws_ypixel: UInt16 = 0
-      }
-      var ws = winsize()
-      ws.ws_row = UInt16(rows)
-      ws.ws_col = UInt16(columns)
-      ws.ws_xpixel = 0
-      ws.ws_ypixel = 0
-      _ = ioctl(masterFD, TIOCSWINSZ, &ws)
+      setWindowSize(fd: masterFD, cols: UInt16(columns), rows: UInt16(rows))
     }
 
     // Monitor the child process to detect when it exits
@@ -1332,9 +1154,20 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   }
 
   @MainActor
+  private func handleOutputChunkOnMain(_ chunk: String) {
+    guard !isShuttingDown && masterFD >= 0 else { return }
+    
+    // Pass the stateful pendingCR flag to the normalization
+    let (normalized, nextPendingCR) = ANSIParser.normalizeControlCharacters(chunk, pendingCR: self.pendingCR)
+    self.pendingCR = nextPendingCR
+    
+    self.appendOutputChunk(normalized)
+  }
+
+  @MainActor
   private func appendOutputChunk(_ chunk: String) {
     guard !chunk.isEmpty else { return }
-    processOSCSequences(in: chunk)
+    
     output = limitOutputSize(output + chunk)
   }
 

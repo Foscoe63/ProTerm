@@ -5,7 +5,8 @@ struct QuickCommandsPanel: View {
     @EnvironmentObject var productivityTools: ProductivityTools
     @EnvironmentObject var terminalManager: TerminalManager
     @Binding var isVisible: Bool
-    @State private var selectedCategory: ProductivityTools.QuickCommand.QuickCommandCategory? = nil
+    @State private var selectedCategory: String? = nil
+    @State private var panelWidth: CGFloat = 280  // Increased default width to accommodate more buttons
     
     var body: some View {
         if isVisible {
@@ -27,7 +28,7 @@ struct QuickCommandsPanel: View {
                 Divider()
                 
                 // Category filter
-                ScrollView(.horizontal, showsIndicators: false) {
+                ScrollView(.horizontal, showsIndicators: true) {
                     HStack(spacing: 8) {
                         Button("All") {
                             selectedCategory = nil
@@ -35,8 +36,8 @@ struct QuickCommandsPanel: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         
-                        ForEach(ProductivityTools.QuickCommand.QuickCommandCategory.allCases, id: \.self) { category in
-                            Button(category.rawValue) {
+                        ForEach(availableCategories, id: \.self) { category in
+                            Button(category) {
                                 selectedCategory = category
                             }
                             .buttonStyle(.bordered)
@@ -45,6 +46,7 @@ struct QuickCommandsPanel: View {
                     }
                     .padding(.horizontal)
                 }
+                .frame(height: 44)  // Ensure enough height for buttons
                 .padding(.vertical, 8)
                 
                 Divider()
@@ -59,9 +61,37 @@ struct QuickCommandsPanel: View {
                     .padding()
                 }
             }
-            .frame(width: 250)
+            .frame(width: panelWidth)
             .background(Color(NSColor.windowBackgroundColor))
+            .overlay(
+                // Resize handle on the right edge
+                HStack {
+                    Spacer()
+                    Rectangle()
+                        .fill(Color(NSColor.separatorColor))
+                        .frame(width: 2)
+                        .gesture(
+                            DragGesture()
+                                .onChanged { value in
+                                    let newWidth = panelWidth + value.translation.width
+                                    panelWidth = max(200, min(500, newWidth))
+                                }
+                        )
+                        .onHover { hovering in
+                            if hovering {
+                                NSCursor.resizeLeftRight.push()
+                            } else {
+                                NSCursor.pop()
+                            }
+                        }
+                }
+            )
         }
+    }
+    
+    /// All available categories - includes built-in and custom categories
+    private var availableCategories: [String] {
+        return productivityTools.getAllCategories()
     }
     
     private var filteredCommands: [ProductivityTools.QuickCommand] {
@@ -161,10 +191,17 @@ struct QuickCommandRow: View {
         }
     }
     
+    @MainActor
     private func executeCommand(_ command: ProductivityTools.QuickCommand, keyword: String?) {
         guard !terminalManager.sessions.isEmpty else { return }
-        // Execute in the first session (could be enhanced to use current session)
-        let session = terminalManager.sessions[0]
+        
+        // Find the session with an active PTY (SSH mode), or use the first session
+        let session: TerminalSession
+        if let activePTYSession = terminalManager.sessions.first(where: { $0.hasActivePTY }) {
+            session = activePTYSession
+        } else {
+            session = terminalManager.sessions[0]
+        }
         
         // Build the final command
         var finalCommand = command.command
@@ -172,7 +209,16 @@ struct QuickCommandRow: View {
             finalCommand = "\(command.command) \(keyword)".trimmingCharacters(in: .whitespaces)
         }
         
-        session.runCommand(finalCommand)
+        // If session has an active PTY (SSH mode), send input directly to it
+        // Otherwise, use runCommand which will start a new process
+        if session.hasActivePTY {
+            let sanitized = finalCommand.sanitizedTerminalCommand()
+            // Ensure we send the command with a newline
+            let commandToSend = sanitized.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
+            session.sendInput(commandToSend)
+        } else {
+            session.runCommand(finalCommand)
+        }
         
         // Update usage stats
         productivityTools.recordQuickCommandUsage(command.id)

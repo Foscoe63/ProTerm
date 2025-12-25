@@ -12,15 +12,23 @@ struct TerminalView: View {
   @State private var commandInput: String = ""
   @State private var passwordInput: String = ""
   @State private var showPasswordInput: Bool = false
+  @State private var showPaginationInput: Bool = false
+  @State private var lastPasswordSentTime: Date? = nil
+  @State private var isPasswordBeingSent: Bool = false
+  @State private var outputSnapshotWhenPasswordSent: String = ""
+  @State private var lastPaginationKeySentTime: Date? = nil
+  @State private var lastCommandSentTime: Date? = nil
+  @State private var focusRestorationTimer: Timer? = nil
+  @State private var lastTypingTime: Date? = nil
   @State private var searchQuery: String = ""
   @State private var selectedOutput: String = ""  // tracks current selection
   @FocusState private var commandFieldIsFocused: Bool  // ← focus‑state for the TextField
   @FocusState private var passwordFieldIsFocused: Bool  // ← focus‑state for password field
   @State private var hasRequestedInitialFocus = false  // Track if we've set initial focus
+  @State private var commandFieldIsFocusedState: Bool = false  // Sync state for modifiers
   @State private var cachedAttributedOutput: AttributedString = AttributedString("")
   @State private var hasPendingBracketedPaste = false
 
-  @EnvironmentObject private var lineNumbersManager: LineNumbersManager
   @EnvironmentObject private var themeManager: ThemeManager
   @EnvironmentObject private var fontManager: FontManager
   @EnvironmentObject private var advancedFeatures: AdvancedFeatures
@@ -73,13 +81,11 @@ struct TerminalView: View {
       commandInput = ""
       // Still restore focus even for empty commands
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-        Task { @MainActor in
-          commandFieldIsFocused = true
-          requestControllerFocus(reason: .manual)
-          // Also broadcast a focus request to ensure AppKit first responder is set
-          NotificationCenter.default.post(
-            name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
-        }
+        self.commandFieldIsFocused = true
+        self.requestControllerFocus(reason: .manual)
+        // Also broadcast a focus request to ensure AppKit first responder is set
+        NotificationCenter.default.post(
+          name: Notification.Name("ProTermFocusCommandInput"), object: self.session.id)
       }
       return
     }
@@ -89,12 +95,10 @@ struct TerminalView: View {
     guard !session.isProcessRunning || session.hasActivePTY else {
       // Restore focus even if command can't run
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-        Task { @MainActor in
-          commandFieldIsFocused = true
-          requestControllerFocus(reason: .manual)
-          NotificationCenter.default.post(
-            name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
-        }
+        commandFieldIsFocused = true
+        requestControllerFocus(reason: .manual)
+        NotificationCenter.default.post(
+          name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
       }
       return
     }
@@ -111,20 +115,17 @@ struct TerminalView: View {
     // Return focus to the field after running (with delay to ensure view has updated)
     // Use a longer delay to ensure all output updates have completed
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-      Task { @MainActor in
         commandFieldIsFocused = true
         requestControllerFocus(reason: .manual)
         NotificationCenter.default.post(
           name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
-      }
+      
       // Also try again after a bit more time in case output is still updating
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-        Task { @MainActor in
           commandFieldIsFocused = true
           requestControllerFocus(reason: .manual)
           NotificationCenter.default.post(
             name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
-        }
       }
     }
   }
@@ -148,63 +149,48 @@ struct TerminalView: View {
 
   var body: some View {
     terminalOutputArea
-      .onAppear {
-        requestControllerFocus(reason: .viewAppeared)
-        // CRITICAL: Request initial focus immediately
-        if !hasRequestedInitialFocus {
-          hasRequestedInitialFocus = true
-          commandFieldIsFocused = true
-        }
-
-        // Start attempting focus immediately and with retries
-        forceFocus(reason: .startup, allowActivation: true)
-
-        // Retry sequence to handle window activation delays
-        Task { @MainActor in
-          try? await Task.sleep(nanoseconds: 100_000_000)  // 0.1s
-          forceFocus(reason: .startup, allowActivation: true)
-          try? await Task.sleep(nanoseconds: 400_000_000)  // 0.5s
-          forceFocus(reason: .startup, allowActivation: true)
-          try? await Task.sleep(nanoseconds: 500_000_000)  // 1.0s
-          forceFocus(reason: .startup, allowActivation: true)
-        }
-        Task { @MainActor in
-          try? await Task.sleep(nanoseconds: 1_500_000_000)
-          guard hasRequestedInitialFocus else { return }
-          forceFocus(reason: .startup, allowActivation: true)
-        }
+      .onAppear(perform: handleViewAppear)
+      .onDisappear(perform: handleViewDisappear)
+      .modifier(SSHTimerModifier(
+        session: session,
+        showPasswordInput: showPasswordInput,
+        showPaginationInput: showPaginationInput,
+        focusRestorationTimer: $focusRestorationTimer,
+        startFocusRestorationTimer: startFocusRestorationTimer
+      ))
+      .modifier(FocusRestorationModifier(
+        session: session,
+        showPasswordInput: showPasswordInput,
+        showPaginationInput: showPaginationInput,
+        commandFieldIsFocused: commandFieldIsFocused,
+        lastTypingTime: lastTypingTime,
+        requestControllerFocus: requestControllerFocus,
+        commandFieldIsFocusedBinding: $commandFieldIsFocusedState
+      ))
+      .onChange(of: commandFieldIsFocused) { _, newValue in
+        commandFieldIsFocusedState = newValue
       }
-      .onDisappear {
-        focusController.clearActiveSession(session.id)
+      .onChange(of: commandFieldIsFocusedState) { _, newValue in
+        commandFieldIsFocused = newValue
       }
-      .background(WindowAccessor())  // Add WindowAccessor for robust window-level focus handling
-      // Listen for window becoming key to set focus - this is the most reliable trigger
-      .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) {
-        notification in
-        // When window becomes key, ensure focus is set
-        // Check if this notification is for our window
-        if let window = notification.object as? NSWindow,
-          let myWindow = NSApplication.shared.mainWindow ?? NSApplication.shared.keyWindow,
-          window === myWindow
-        {
-          // Use forceFocus to ensure all focus mechanisms are triggered
-          forceFocus(reason: .windowBecameKey)
-        }
-      }
-      // (Removed early, duplicate focus listener. Focus is handled below with target filtering.)
-      // Detect password prompts in output
-      .onChange(of: session.output) { _, _ in
-        checkForPasswordPrompt()
-      }
-      // Also check when process running state changes
-      .onChange(of: session.isProcessRunning) { _, isRunning in
-        if !isRunning && showPasswordInput {
-          // Process finished, hide password input
-          showPasswordInput = false
-          passwordInput = ""
-          commandFieldIsFocused = true
-        }
-      }
+      .background(WindowAccessor())
+      .modifier(OutputChangeModifier(
+        session: session,
+        showPaginationInput: showPaginationInput,
+        showPasswordInput: $showPasswordInput,
+        showPaginationInputBinding: $showPaginationInput,
+        passwordInput: $passwordInput,
+        commandInput: $commandInput,
+        commandFieldIsFocused: $commandFieldIsFocusedState,
+        lastPasswordSentTime: $lastPasswordSentTime,
+        isPasswordBeingSent: $isPasswordBeingSent,
+        outputSnapshotWhenPasswordSent: $outputSnapshotWhenPasswordSent,
+        lastPaginationKeySentTime: $lastPaginationKeySentTime,
+        checkForPasswordPrompt: checkForPasswordPrompt,
+        checkForPaginationPrompt: checkForPaginationPrompt,
+        updateCachedAttributedOutput: updateCachedAttributedOutput,
+        handleSSHOutputChange: handleSSHOutputChange
+      ))
       // Listen for search notifications from the button bar
       .onReceive(NotificationCenter.default.publisher(for: .searchInTerminal)) { notification in
         if let query = notification.object as? String {
@@ -267,9 +253,7 @@ struct TerminalView: View {
         }
       }
       // Listen for focus command input (targeted by session UUID, or nil for current session)
-      .onReceive(
-        NotificationCenter.default.publisher(for: Notification.Name("ProTermFocusCommandInput"))
-      ) { note in
+      .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermFocusCommandInput"))) { note in
         // If notification has a specific session ID, only focus if it matches
         // If notification has nil (no specific session), focus this session
         let shouldFocus: Bool
@@ -350,7 +334,7 @@ struct TerminalView: View {
       let appearance = activeProfile
       let horizontalPadding = CGFloat(appearance.horizontalPadding)
       let verticalPadding = CGFloat(appearance.verticalPadding)
-      let lineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+      let lineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
       let availableWidth = max(40, geo.size.width - horizontalPadding * 2)
 
       ZStack {
@@ -374,7 +358,7 @@ struct TerminalView: View {
         if mouseReportingActive {
           let insets = EdgeInsets(
             top: verticalPadding,
-            leading: horizontalPadding + (lineNumbersManager.showLineNumbers ? 60 : 0),
+            leading: horizontalPadding + (visualSettings.showLineNumbers ? 60 : 0),
             bottom: verticalPadding,
             trailing: horizontalPadding
           )
@@ -395,24 +379,24 @@ struct TerminalView: View {
       .onChange(of: geo.size.width) { _, newWidth in
         recalculateTerminalWidth(totalWidth: newWidth, lineNumberWidth: lineNumbersWidth)
       }
-      .onChange(of: lineNumbersManager.showLineNumbers) { _, _ in
-        let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+      .onChange(of: visualSettings.showLineNumbers) { _, _ in
+        let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
       }
       .onChange(of: themeManager.activeProfileID) { _, _ in
-        let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+        let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
       }
       .onChange(of: themeManager.activeProfile.horizontalPadding) { _, _ in
-        let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+        let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
       }
       .onChange(of: fontManager.fontSize) { _, _ in
-        let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+        let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
       }
       .onChange(of: fontManager.fontName) { _, _ in
-        let newLineNumbersWidth = lineNumbersManager.showLineNumbers ? 40.0 : 0.0
+        let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
       }
     }
@@ -481,32 +465,40 @@ struct TerminalView: View {
     geo: GeometryProxy, proxy: ScrollViewProxy, availableWidth: CGFloat
   ) -> some View {
     ScrollView(.vertical) {
-      Group {
-        if shouldUseVirtualScrolling {
-          LazyVStack(alignment: .leading, spacing: 0) {
-            virtualScrolledOutput(availableWidth: availableWidth)
-            commandInputArea
-            Color.clear.frame(height: 1).id("BOTTOM")
-          }
-          .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-          VStack(alignment: .leading, spacing: 0) {
-            outputLineWithNumbers(availableWidth: availableWidth)
-            commandInputArea
-            Color.clear.frame(height: 1).id("BOTTOM")
-          }
-          .frame(maxWidth: .infinity, alignment: .leading)
+      if shouldUseVirtualScrolling {
+        LazyVStack(alignment: .leading, spacing: 0) {
+          virtualScrolledOutput(availableWidth: availableWidth)
+          commandInputArea
+          Color.clear.frame(height: 1).id("BOTTOM")
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+      } else {
+        VStack(alignment: .leading, spacing: 0) {
+          outputLineWithNumbers(availableWidth: availableWidth)
+          commandInputArea
+          Color.clear.frame(height: 1).id("BOTTOM")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
     }
+    .id("TERMINAL_SCROLL_VIEW")
     .scrollIndicators(.visible)
     .onChange(of: session.output) { _, _ in
       updateCachedAttributedOutput()
-      // Only auto-scroll if user was at bottom or if visualSettings.autoScroll is enabled
+      // Logic: Only auto-scroll if:
+      // 1. We're showing pagination (always show new pages)
+      // 2. Auto-scroll is enabled AND user is already at bottom (Standard "Follow Tail" behavior)
+      // 3. User is actively typing (they want to see their input)
       let wasAtBottom = terminalManager.scrollPositions[session.id] ?? 1.0 >= 0.9
-      if visualSettings.autoScroll || wasAtBottom {
+      let userIsTyping = lastTypingTime.map { Date().timeIntervalSince($0) < 1.0 } ?? false
+      
+      if showPaginationInput || (visualSettings.autoScroll && wasAtBottom) || userIsTyping {
         DispatchQueue.main.async {
-          withAnimation(.easeOut(duration: 0.15)) {
+          // Perform immediate scroll
+          proxy.scrollTo("BOTTOM", anchor: .bottom)
+          
+          // Redundant follow-up to catch layout settling in high-volume dumps
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             proxy.scrollTo("BOTTOM", anchor: .bottom)
           }
         }
@@ -515,9 +507,16 @@ struct TerminalView: View {
     }
     .onChange(of: commandFieldIsFocused) { _, isFocused in
       if isFocused {
-        DispatchQueue.main.async {
-          withAnimation(.easeOut(duration: 0.15)) {
-            proxy.scrollTo("command-input", anchor: .bottom)
+        let wasAtBottom = terminalManager.scrollPositions[session.id] ?? 1.0 >= 0.9
+        let userIsTyping = lastTypingTime.map { Date().timeIntervalSince($0) < 1.0 } ?? false
+        
+        // Only scroll to input if user is near bottom or actively typing.
+        // This prevents yanking during SSH focus restoration if user is scrolled up.
+        if wasAtBottom || userIsTyping {
+          DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.15)) {
+              proxy.scrollTo("command-input", anchor: .bottom)
+            }
           }
         }
       }
@@ -546,6 +545,15 @@ struct TerminalView: View {
       if terminalManager.scrollPositions[session.id] == nil {
         terminalManager.scrollPositions[session.id] = 1.0
       }
+      
+      // Listen for pagination key sends to update cooldown
+      NotificationCenter.default.addObserver(forName: Notification.Name("ProTermPaginationKeySent"), object: nil, queue: .main) { [weak session] _ in
+        guard let _ = session else { return }
+        Task { @MainActor in
+          self.lastPaginationKeySentTime = Date()
+        }
+      }
+      
       DispatchQueue.main.async {
         // Always start at bottom on appear (user can scroll if needed)
         proxy.scrollTo("BOTTOM", anchor: .bottom)
@@ -559,20 +567,26 @@ struct TerminalView: View {
 
   @ViewBuilder
   private func outputLineWithNumbers(availableWidth: CGFloat) -> some View {
-    let lineNumberWidth: CGFloat = lineNumbersManager.showLineNumbers ? 29.0 : 0.0  // 23 + 6 padding
-    let textWidth = availableWidth - lineNumberWidth
+    let split = calculateOutputSplit()
+    let lineNumberWidth: CGFloat = visualSettings.showLineNumbers ? 40.0 : 0.0
+    let textWidth = max(40, availableWidth - lineNumberWidth)
     
-    HStack(alignment: .firstTextBaseline, spacing: 0) {
-      if lineNumbersManager.showLineNumbers {
-        LineNumbersView(attributedText: highlightedAttributedOutput, font: fontManager.font)
-          .font(fontManager.font)
-          .foregroundColor(.gray)
-          .frame(width: 23, alignment: .trailing)
-          .padding(.trailing, 6)
-          .padding(.vertical, 4)
+    HStack(alignment: .top, spacing: 0) {
+      if visualSettings.showLineNumbers {
+          // Use a very simple, direct approach for the gutter to ensure it matches the body
+          LineNumbersView(attributedText: split.body, font: fontManager.font)
+            .frame(width: 30, alignment: .trailing)
+            .padding(.trailing, 10)
+            .padding(.top, 4)
       }
-      terminalOutputText(availableWidth: availableWidth)
+      
+      Text(split.body)
+        .font(fontManager.font)
+        .foregroundColor(themeManager.current.foreground)
+        .textSelection(.enabled) // RESTORE HIGHLIGHT AND COPY
+        .lineSpacing(0)
         .frame(width: textWidth, alignment: .leading)
+        .padding(.top, 4)
     }
   }
 
@@ -580,15 +594,108 @@ struct TerminalView: View {
   private var commandInputArea: some View {
     if showPasswordInput {
       passwordInputView
+    } else if showPaginationInput {
+      paginationInputView
     } else {
       regularCommandInputView
     }
+  }
+  
+  @ViewBuilder
+  private var paginationInputView: some View {
+    let split = calculateOutputSplit()
+    HStack(alignment: .center, spacing: 0) {
+      if visualSettings.showLineNumbers {
+        Text("\(calculateCommandInputLineNumber())")
+          .font(fontManager.font)
+          .foregroundColor(.gray)
+          .frame(width: 23, alignment: .trailing)
+          .padding(.trailing, 6)
+          .padding(.vertical, 4)
+      }
+      HStack(spacing: 4) {
+        // Show the terminal's prompt if it's not empty (e.g. "<--- More --->")
+        if !split.prompt.characters.isEmpty {
+          Text(split.prompt)
+            .font(fontManager.font)
+            .foregroundColor(themeManager.current.foreground)
+            .padding(.trailing, 4)
+        }
+        
+        Text("Pagination active - Press Space/Enter/Q: ")
+          .font(fontManager.font)
+          .foregroundColor(.blue)
+
+        CustomTextField(
+          text: $commandInput,
+          placeholder: "Press Space, Enter, or Q",
+          font: NSFont(name: fontManager.fontName, size: fontManager.fontSize)
+            ?? NSFont.monospacedSystemFont(ofSize: fontManager.fontSize, weight: .regular),
+          textColor: NSColor(themeManager.current.foreground),
+          cursorStyle: visualSettings.cursorStyle,
+          cursorBlinking: visualSettings.cursorBlinking,
+          cursorColor: NSColor(themeManager.current.cursor),
+          onSubmit: {
+            // Send Enter directly to PTY for pagination
+            if session.hasActivePTY {
+              // Record when we sent the pagination key for cooldown
+              lastPaginationKeySentTime = Date()
+              session.sendInput("\n")
+              commandInput = ""
+              // Keep focus on the field for next pagination key
+              DispatchQueue.main.async {
+                commandFieldIsFocused = true
+              }
+            }
+          },
+          onTab: {
+            return false
+          },
+          onUpArrow: {
+            return false
+          },
+          onDownArrow: {
+            return false
+          },
+          isFocused: Binding(
+            get: { commandFieldIsFocused },
+            set: { commandFieldIsFocused = $0 }
+          ),
+          sessionID: session.id,
+          isPaginationActive: true,
+          onPaginationKey: { key in
+            // Send pagination key directly to PTY
+            if session.hasActivePTY {
+              // Record when we sent the pagination key for cooldown
+              lastPaginationKeySentTime = Date()
+              session.sendInput(key)
+              commandInput = ""
+              // Keep pagination UI visible and focused - CRITICAL to prevent UI from hiding
+              showPaginationInput = true
+              // Keep focus on the field for next pagination key
+              DispatchQueue.main.async {
+                self.commandFieldIsFocused = true
+              }
+            }
+          }
+        )
+        .id("\(visualSettings.cursorStyle.rawValue)-\(visualSettings.cursorBlinking)-pagination")
+        .disabled(false)
+        .accessibilityLabel("Pagination input field")
+        .accessibilityHint("Press Space for next page, Enter for next line, Q to quit")
+        .frame(maxWidth: 200)
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 4)
+      Spacer()
+    }
+    .id("pagination-input")
   }
 
   @ViewBuilder
   private var passwordInputView: some View {
     HStack(alignment: .center, spacing: 0) {
-      if lineNumbersManager.showLineNumbers {
+      if visualSettings.showLineNumbers {
         Text("\(calculateCommandInputLineNumber())")
           .font(fontManager.font)
           .foregroundColor(.gray)
@@ -606,13 +713,34 @@ struct TerminalView: View {
           .accessibilityLabel("Password input field")
           .accessibilityHint("Enter your password for sudo commands")
           .onSubmit {
-            let password = passwordInput
+            // Prevent sending password multiple times
+            guard !isPasswordBeingSent else { return }
+            
+            let password = passwordInput.trimmingCharacters(in: .whitespacesAndNewlines)
             passwordInput = ""
-            if !password.isEmpty {
-              session.sendInput(password + "\n")
-              DispatchQueue.main.async {
-                NSApp.activate(ignoringOtherApps: true)
-                passwordFieldIsFocused = true
+            
+            guard !password.isEmpty else { return }
+            
+            // Set flag to prevent duplicate sends
+            isPasswordBeingSent = true
+            // Record when we sent the password to prevent immediate re-detection
+            lastPasswordSentTime = Date()
+            // Save output snapshot to detect if output changes after sending password
+            outputSnapshotWhenPasswordSent = session.output
+            
+            
+            // Send password immediately - SSH expects immediate response to password prompt
+            // No delay needed - the prompt detection already ensures the prompt is ready
+            session.sendInput(password + "\n")
+            
+            // Clear password input immediately
+            DispatchQueue.main.async {
+              NSApp.activate(ignoringOtherApps: true)
+              passwordFieldIsFocused = true
+              
+              // Reset the flag after a short delay to allow for retry if needed
+              DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                isPasswordBeingSent = false
               }
             }
           }
@@ -633,7 +761,7 @@ struct TerminalView: View {
   @ViewBuilder
   private var regularCommandInputView: some View {
     HStack(alignment: .firstTextBaseline, spacing: 0) {
-      if lineNumbersManager.showLineNumbers {
+      if visualSettings.showLineNumbers {
         Text("\(calculateCommandInputLineNumber())")
           .font(fontManager.font)
           .foregroundColor(.gray)
@@ -642,10 +770,17 @@ struct TerminalView: View {
           .padding(.vertical, 4)
       }
 
-      HStack(alignment: .firstTextBaseline, spacing: 4) {
-        Text(session.prompt)
-          .font(fontManager.font)
-          .foregroundColor(themeManager.current.foreground)
+      HStack(alignment: .firstTextBaseline, spacing: 0) {
+        let split = calculateOutputSplit()
+        let promptText = !String(split.prompt.characters).isEmpty ? split.prompt : AttributedString(session.prompt)
+        
+        if !String(promptText.characters).isEmpty {
+            Text(promptText)
+              .font(fontManager.font)
+              .foregroundColor(themeManager.current.foreground)
+              .padding(.trailing, 0)
+              .baselineOffset(0)
+        }
 
         CustomTextField(
           text: $commandInput,
@@ -657,6 +792,19 @@ struct TerminalView: View {
           cursorBlinking: visualSettings.cursorBlinking,
           cursorColor: NSColor(themeManager.current.cursor),
           onSubmit: {
+            // If pagination is active, send Enter directly to PTY
+            if showPaginationInput && session.hasActivePTY {
+              // Record when we sent the pagination key for cooldown
+              lastPaginationKeySentTime = Date()
+              session.sendInput("\n")
+              commandInput = ""
+              // Keep focus on the field for next pagination key
+              DispatchQueue.main.async {
+                commandFieldIsFocused = true
+              }
+              return
+            }
+            
             let cmd = commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
             let activePTY = session.hasActivePTY
             if activePTY {
@@ -664,12 +812,26 @@ struct TerminalView: View {
               session.sendInput(payload + "\n")
               commandInput = ""
               hasPendingBracketedPaste = false
-              DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                Task { @MainActor in
-                  commandFieldIsFocused = true
-                  requestControllerFocus(reason: .manual)
-                  NotificationCenter.default.post(
-                    name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+              // Track when command was sent for focus restoration
+              lastCommandSentTime = Date()
+              // For SSH/PTY commands, restore focus after a delay to ensure output has started
+              // Use multiple attempts to ensure focus is restored
+              for delay in [0.5, 1.0, 1.5] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                  Task { @MainActor in
+                    // Only restore focus if we're not in password or pagination mode
+                    if !self.showPasswordInput && !self.showPaginationInput {
+                      self.commandFieldIsFocused = true
+                      self.requestControllerFocus(reason: .manual)
+                      NotificationCenter.default.post(
+                        name: Notification.Name("ProTermFocusCommandInput"), object: self.session.id)
+                      // Ensure window is key
+                      NSApp.activate(ignoringOtherApps: true)
+                      if let window = NSApplication.shared.mainWindow {
+                        window.makeKeyAndOrderFront(nil)
+                      }
+                    }
+                  }
                 }
               }
             } else if !cmd.isEmpty {
@@ -694,7 +856,9 @@ struct TerminalView: View {
             get: { commandFieldIsFocused },
             set: { commandFieldIsFocused = $0 }
           ),
-          sessionID: session.id
+          sessionID: session.id,
+          isPaginationActive: false,  // Regular command input - pagination is handled by paginationInputView
+          onPaginationKey: nil  // Not needed for regular input
         )
         .id("\(visualSettings.cursorStyle.rawValue)-\(visualSettings.cursorBlinking)")
         .disabled(false)
@@ -713,6 +877,14 @@ struct TerminalView: View {
           }
         )
         .onChange(of: commandInput) { oldValue, newValue in
+          // Track when user is typing to prevent focus restoration from interfering
+          if newValue != oldValue && !newValue.isEmpty {
+            lastTypingTime = Date()
+            // Stop focus restoration timer while user is actively typing
+            focusRestorationTimer?.invalidate()
+            focusRestorationTimer = nil
+          }
+          
           if newValue != lastCompletionInput {
             currentCompletions = []
             currentCompletionIndex = 0
@@ -723,36 +895,50 @@ struct TerminalView: View {
           }
           if newValue.isEmpty {
             hasPendingBracketedPaste = false
+            // Restart timer when input is cleared (command was sent)
+            if session.isSSHSession && session.isProcessRunning && !showPasswordInput && !showPaginationInput {
+              // Restart timer after a delay to restore focus after command completes
+              DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                if self.session.isSSHSession && self.session.isProcessRunning && !self.showPasswordInput && !self.showPaginationInput && self.commandInput.isEmpty {
+                  self.startFocusRestorationTimer()
+                }
+              }
+            }
           }
         }
       }
-      .padding(.leading, lineNumbersManager.showLineNumbers ? 0 : CGFloat(themeManager.activeProfile.horizontalPadding))
+      .padding(.leading, visualSettings.showLineNumbers ? 0 : CGFloat(themeManager.activeProfile.horizontalPadding))
       .padding(.trailing, CGFloat(themeManager.activeProfile.horizontalPadding))
-      .padding(.vertical, 4)
+      .padding(.top, session.isSSHSession ? 0 : 4) // Reduce gap in SSH
+      .padding(.bottom, 4)
       .frame(maxWidth: .infinity, alignment: .leading)
     }
     .id("command-input")
     .onAppear {
-      Task { @MainActor in
-        forceFocus(reason: .viewAppeared)
+      // Use multiple attempts with increasing delays to ensure focus is set on startup
+      for delay in [0.05, 0.15, 0.3, 0.5] {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+          Task { @MainActor in
+            // Use allowActivation: true to ensure focus works even on initial startup
+            self.forceFocus(reason: .viewAppeared, allowActivation: true)
+          }
+        }
       }
     }
     .onChange(of: session.isProcessRunning) { oldValue, newValue in
       if oldValue == true && newValue == false {
         commandInput = ""
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-          Task { @MainActor in
-            commandFieldIsFocused = true
-            requestControllerFocus(reason: .manual)
+        // Restore focus after process completes - use multiple attempts to ensure it works
+        for delay in [0.1, 0.3, 0.5] {
+          DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            self.commandFieldIsFocused = true
+            self.requestControllerFocus(reason: .manual)
             NotificationCenter.default.post(
-              name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
-          }
-          DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            Task { @MainActor in
-              commandFieldIsFocused = true
-              requestControllerFocus(reason: .manual)
-              NotificationCenter.default.post(
-                name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+              name: Notification.Name("ProTermFocusCommandInput"), object: self.session.id)
+            // Also ensure window is key and front
+            NSApp.activate(ignoringOtherApps: true)
+            if let window = NSApplication.shared.mainWindow {
+              window.makeKeyAndOrderFront(nil)
             }
           }
         }
@@ -990,13 +1176,15 @@ struct TerminalView: View {
 
   @ViewBuilder
   private func terminalOutputText(availableWidth: CGFloat) -> some View {
-    Text(highlightedAttributedOutput)
+    let split = calculateOutputSplit()
+    Text(split.body)
       .textSelection(.enabled)
       .frame(maxWidth: .infinity, alignment: .leading)
       .fixedSize(horizontal: false, vertical: true)  // Allow horizontal expansion, prevent vertical
-      .padding(.leading, lineNumbersManager.showLineNumbers ? 0 : 10)
+      .padding(.leading, visualSettings.showLineNumbers ? 0 : 10)
       .padding(.trailing, 0)
-      .padding(.vertical, 4)
+      .padding(.top, 4)
+      .padding(.bottom, 0) // No bottom padding to keep it tight with input
       .font(fontManager.font)
       .foregroundColor(themeManager.current.foreground)
       .id("output-\(session.id.uuidString)")  // Ensure output is tied to this session
@@ -1021,13 +1209,14 @@ struct TerminalView: View {
   // Virtual scrolled output - splits into lines for LazyVStack
   @ViewBuilder
   private func virtualScrolledOutput(availableWidth: CGFloat) -> some View {
-    let lines = splitOutputIntoLines()
-    let lineNumberWidth: CGFloat = lineNumbersManager.showLineNumbers ? 29.0 : 0.0  // 23 + 6 padding
+    let split = calculateOutputSplit()
+    let lines = splitOutputIntoLines(from: split.body)
+    let lineNumberWidth: CGFloat = visualSettings.showLineNumbers ? 29.0 : 0.0  // 23 + 6 padding
     let textWidth = availableWidth - lineNumberWidth
     
     ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
       HStack(alignment: .firstTextBaseline, spacing: 0) {
-        if lineNumbersManager.showLineNumbers {
+        if visualSettings.showLineNumbers {
           Text("\(index + 1)")
             .font(fontManager.font)
             .foregroundColor(.gray)
@@ -1038,7 +1227,7 @@ struct TerminalView: View {
         Text(line)
           .frame(width: textWidth, alignment: .leading)
           .fixedSize(horizontal: false, vertical: true)
-          .padding(.leading, lineNumbersManager.showLineNumbers ? 0 : 10)
+          .padding(.leading, visualSettings.showLineNumbers ? 0 : 10)
           .padding(.trailing, 0)
           .padding(.vertical, 4)
           .font(fontManager.font)
@@ -1049,8 +1238,7 @@ struct TerminalView: View {
   }
 
   // Split output into individual lines for virtual scrolling
-  private func splitOutputIntoLines() -> [AttributedString] {
-    let fullOutput = highlightedAttributedOutput
+  private func splitOutputIntoLines(from fullOutput: AttributedString) -> [AttributedString] {
     let string = String(fullOutput.characters)
     let lines = string.components(separatedBy: .newlines)
 
@@ -1076,6 +1264,39 @@ struct TerminalView: View {
     }
   }
 
+  @MainActor
+  private func handleViewAppear() {
+    // Aggressively set initial focus with multiple attempts
+    for delay in [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0] {
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+        Task { @MainActor in
+          // Set the SwiftUI focus state
+          self.commandFieldIsFocused = true
+          
+          // Force app and window activation
+          NSApp.activate(ignoringOtherApps: true)
+          
+          if let window = NSApplication.shared.mainWindow ?? NSApplication.shared.keyWindow ?? NSApp.windows.first {
+            window.makeKeyAndOrderFront(nil)
+            
+            // Try to focus the command field directly
+            if let contentView = window.contentView {
+              self.focusCommandFieldInView(contentView, allowActivation: true)
+            }
+          }
+          
+          // Also use the focus controller
+          self.requestControllerFocus(reason: .viewAppeared)
+        }
+      }
+    }
+  }
+  
+  @MainActor
+  private func handleViewDisappear() {
+    // View disappeared - any cleanup can go here
+  }
+  
   @MainActor
   private func requestControllerFocus(reason: CommandInputFocusController.FocusReason) {
     focusController.setActiveSession(session.id)
@@ -1205,33 +1426,148 @@ struct TerminalView: View {
     return nil
   }
 
-  // Calculate line number for command input (output lines + 1)
-  private func calculateCommandInputLineNumber() -> Int {
-    let text = String(highlightedAttributedOutput.characters)
-    var workingText = text
-
-    // Remove ALL trailing newlines
-    while workingText.hasSuffix("\n") || workingText.hasSuffix("\r\n")
-      || workingText.hasSuffix("\r")
-    {
-      if workingText.hasSuffix("\r\n") {
-        workingText = String(workingText.dropLast(2))
-      } else if workingText.hasSuffix("\n") {
-        workingText = String(workingText.dropLast(1))
-      } else if workingText.hasSuffix("\r") {
-        workingText = String(workingText.dropLast(1))
+  // Handle SSH output changes - restore focus if needed
+  private func handleSSHOutputChange() {
+    // For SSH sessions, aggressively restore focus after output changes
+    // This handles the case where commands complete but process stays running
+    guard session.isSSHSession && session.isProcessRunning && !showPasswordInput && !showPaginationInput else {
+      return
+    }
+    
+    // Detect if output ends with a command prompt (indicates command completed)
+    let output = session.output
+    let lines = output.components(separatedBy: .newlines)
+    let lastNonEmptyLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? ""
+    let trimmedLine = lastNonEmptyLine.trimmingCharacters(in: .whitespaces)
+    
+    // Common shell prompt patterns - if we see one, command has completed
+    let hasPrompt = trimmedLine.hasSuffix("> ") || 
+                    trimmedLine.hasSuffix("# ") || 
+                    trimmedLine.hasSuffix("$ ") ||
+                    trimmedLine.hasSuffix(">") ||
+                    trimmedLine.hasSuffix("#") ||
+                    trimmedLine.hasSuffix("$") ||
+                    trimmedLine.contains("@") && (trimmedLine.hasSuffix(">") || trimmedLine.hasSuffix("#"))
+    
+    // If we detect a prompt, restore focus immediately
+    if hasPrompt {
+      restoreSSHFocus()
+    } else {
+      // Use delayed attempts for other cases
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        if self.session.isSSHSession && self.session.isProcessRunning && !self.showPasswordInput && !self.showPaginationInput {
+          self.restoreSSHFocus()
+        }
       }
     }
-
-    if workingText.isEmpty {
-      // No output yet, first line number for command input
-      return 1
+  }
+  
+  // Separate function to restore SSH focus - can be called from multiple places
+  @MainActor
+  private func restoreSSHFocus() {
+    guard session.isSSHSession && session.isProcessRunning && !showPasswordInput && !showPaginationInput else {
+      return
     }
+    
+    // Don't restore if user is actively typing
+    if let lastTyped = lastTypingTime, Date().timeIntervalSince(lastTyped) < 1.0 {
+      return
+    }
+    
+    commandFieldIsFocused = true
+    requestControllerFocus(reason: .manual)
+    
+    // Directly focus the text field via AppKit for more reliable focus
+    // Use allowActivation: true to ensure focus is set even if window lost key status
+    if let window = NSApplication.shared.mainWindow ?? NSApplication.shared.keyWindow {
+      // Make sure window is key
+      if !window.isKeyWindow {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+      }
+      if let contentView = window.contentView {
+        focusCommandFieldInView(contentView, allowActivation: true)
+      }
+    }
+  }
 
-    // Output line count is number of newlines + 1 (after trimming trailing newlines)
-    // The command input should appear on the NEXT line, so add one more
-    let outputLines = workingText.filter { $0 == "\n" }.count + 1
-    return outputLines + 1
+  // Start focus restoration timer for SSH sessions
+  // Only restores focus if it's actually lost and user is not actively typing
+  private func startFocusRestorationTimer() {
+    // Stop any existing timer
+    focusRestorationTimer?.invalidate()
+    
+    // Don't start timer if user is actively typing
+    if let lastTyped = lastTypingTime, Date().timeIntervalSince(lastTyped) < 2.0 {
+      return
+    }
+    
+    // Don't start timer if app is not active
+    if !NSApp.isActive {
+      return
+    }
+    
+    // Capture session ID to avoid capturing the entire view
+    let sessionId = session.id
+    
+    // Create a timer that runs every 5 seconds to restore focus ONLY if lost
+    // Must run on main thread for UI updates
+    focusRestorationTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
+      DispatchQueue.main.async {
+        // Only restore focus if:
+        // 1. App is active
+        // 2. User is not actively typing
+        // 3. Not in password/pagination mode
+        let recentlyTyped = self.lastTypingTime != nil && Date().timeIntervalSince(self.lastTypingTime!) < 3.0
+        if NSApp.isActive && 
+           !recentlyTyped &&
+           !self.showPasswordInput && 
+           !self.showPaginationInput &&
+           self.session.isSSHSession && 
+           self.session.isProcessRunning {
+          // Check via notification to avoid capturing view state
+          NotificationCenter.default.post(
+            name: Notification.Name("ProTermFocusCommandInput"), object: sessionId)
+        }
+      }
+    }
+    // Add timer to main run loop
+    if let timer = focusRestorationTimer {
+      RunLoop.main.add(timer, forMode: .common)
+    }
+  }
+
+  private func calculateCommandInputLineNumber() -> Int {
+    let raw = session.output
+    if raw.isEmpty { return 1 }
+    
+    // The input area should show the line number of the LAST line if it's a partial line
+    // Or the NEXT line if the output ends in a newline.
+    let lines = raw.components(separatedBy: .newlines)
+    return max(1, lines.count)
+  }
+
+  // Splits the output into a main body and a trailing partial line (the prompt)
+  private func calculateOutputSplit() -> (body: AttributedString, prompt: AttributedString) {
+    let full = highlightedAttributedOutput
+    let raw = String(full.characters)
+    
+    // Find the last newline to split off the prompt/partial line
+    if let lastNewlineRange = raw.range(of: "\n", options: .backwards) {
+        // Map the string index to AttributedString index
+        let offset = raw.distance(from: raw.startIndex, to: lastNewlineRange.upperBound)
+        let splitIndex = full.characters.index(full.startIndex, offsetBy: offset)
+        
+        // Slicing AttributedString returns a slice; convert back to AttributedString for use
+        let body = AttributedString(full[..<splitIndex])
+        let prompt = AttributedString(full[splitIndex...])
+        return (body, prompt)
+    } else if !raw.isEmpty {
+        // No newlines, the whole thing is a prompt
+        return (AttributedString(""), full)
+    }
+    
+    return (full, AttributedString(""))
   }
 
   // Helper to update the cached attributed output
@@ -1296,15 +1632,158 @@ struct TerminalView: View {
     cachedAttributedOutput = attributed
   }
 
+  // MARK: - Pagination Prompt Detection
+
+  private func checkForPaginationPrompt() {
+    let normalizedOutput = String(highlightedAttributedOutput.characters)
+    let normalizedLines = normalizedOutput.components(separatedBy: .newlines)
+    
+    // 1. Pattern detection - check this FIRST
+    // Look at the very last line and a raw tail of the output
+    let lastLine = normalizedLines.last?.lowercased() ?? ""
+    let rawTail = normalizedOutput.suffix(60).lowercased()
+    
+    let paginationPatterns = [
+      "---more---", "--more--", "press return", "press space", "(more)", "more--",
+      "press return for more", "press space for more", "-- more --", "pagination active",
+      "<--- more --->", "<- more ->", "more >", "<--- more", "more --->", "more ---"
+    ]
+    
+    let hasPaginationPattern = paginationPatterns.contains { pattern in 
+        lastLine.contains(pattern) || rawTail.contains(pattern)
+    }
+    
+    // 2. Prompt detection - only used to DEACTIVATE pagination
+    // Check if the output ends with a command prompt (#, >, $)
+    // We only look at the VERY last line to avoid catching old prompts from the buffer
+    let trimmedLastLine = lastLine.trimmingCharacters(in: .whitespacesAndNewlines)
+    
+    // Cisco/ASA prompts usually end with # or >
+    // We only consider it a clear prompt if it's NOT also a pagination pattern
+    let hasClearPrompt = (trimmedLastLine.hasSuffix(">") || 
+                         trimmedLastLine.hasSuffix("#") || 
+                         trimmedLastLine.hasSuffix("$") ||
+                         trimmedLastLine.hasSuffix("> ") || 
+                         trimmedLastLine.hasSuffix("# ") || 
+                         trimmedLastLine.hasSuffix("$ ")) && !hasPaginationPattern
+    
+    // 3. Determine if we should be active
+    let shouldBeActive = hasPaginationPattern && session.isProcessRunning && session.hasActivePTY
+    
+    if shouldBeActive {
+        if !showPaginationInput {
+            showPaginationInput = true
+            DispatchQueue.main.async {
+                commandFieldIsFocused = true
+            }
+        }
+        return // Stay in pagination mode, don't check for prompts or cooldowns
+    }
+
+    // 4. Deactivation by clear prompt
+    if hasClearPrompt {
+        if showPaginationInput {
+            showPaginationInput = false
+            commandFieldIsFocused = true
+            lastPaginationKeySentTime = nil
+        }
+        return
+    }
+
+    // 5. Cooldown/Auto-hide logic
+    if let lastSent = lastPaginationKeySentTime {
+      let timeSinceSent = Date().timeIntervalSince(lastSent)
+      if timeSinceSent < 1.0 {
+        // Maintain current state during short cooldown
+        return
+      }
+    }
+    
+    if showPaginationInput {
+      showPaginationInput = false
+      commandFieldIsFocused = true
+    }
+  }
+
   // MARK: - Password Prompt Detection
 
   private func checkForPasswordPrompt() {
+    // First, check if password was accepted (even during cooldown)
+    // This allows us to hide the password input immediately when login succeeds
+    if showPasswordInput {
+      let output = session.output
+      let lines = output.components(separatedBy: .newlines)
+      let recentLines = lines.suffix(5).joined(separator: "\n")
+      let recentLinesLower = recentLines.lowercased()
+      let lastNonEmptyLines = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+      let lastLine = lastNonEmptyLines.last?.lowercased() ?? ""
+      
+      // Check for successful login indicators (SSH) or prompt changes (enable command)
+      let hasSuccessfulLogin = recentLinesLower.contains("logged in") || 
+                                recentLinesLower.contains("login:")
+      
+      // Check for prompt changes that indicate password was accepted
+      // For enable command, we might see prompt change from ">" to "#" or just a new prompt
+      let hasPromptChange = (lastLine.contains("# ") && !lastLine.contains("password:")) ||
+                            (lastLine.contains("> ") && !lastLine.contains("password:") && !recentLinesLower.contains("password:")) ||
+                            (lastLine.contains("$ ") && !lastLine.contains("password:"))
+      
+      // Check if password prompt is still present
+      let hasPasswordPrompt = (lastLine.hasSuffix("password:") || lastLine.hasSuffix("'s password:") || 
+                               lastLine.hasSuffix("Password:") || recentLinesLower.contains("password:")) &&
+                              session.isProcessRunning &&
+                              !lastLine.contains("# ") && !lastLine.contains("$ ")
+      
+      // If we see successful login OR prompt change AND no password prompt, accept the password immediately
+      if (hasSuccessfulLogin || hasPromptChange) && !hasPasswordPrompt {
+        showPasswordInput = false
+        passwordInput = ""
+        lastPasswordSentTime = nil
+        isPasswordBeingSent = false
+        outputSnapshotWhenPasswordSent = ""
+        // Restore focus with multiple attempts to ensure it works
+        for delay in [0.1, 0.3, 0.5] {
+          DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            self.commandFieldIsFocused = true
+            self.requestControllerFocus(reason: .manual)
+            NotificationCenter.default.post(
+              name: Notification.Name("ProTermFocusCommandInput"), object: self.session.id)
+            NSApp.activate(ignoringOtherApps: true)
+            if let window = NSApplication.shared.mainWindow {
+              window.makeKeyAndOrderFront(nil)
+            }
+          }
+        }
+        return
+      }
+    }
+    
+    // Don't re-detect password prompt immediately after sending password
+    // This prevents the prompt from being detected again before SSH processes the password
+    if let lastSent = lastPasswordSentTime {
+      let timeSinceSent = Date().timeIntervalSince(lastSent)
+      // If output hasn't changed since we sent password, extend the cooldown
+      let outputChanged = session.output != outputSnapshotWhenPasswordSent
+      let cooldownTime = outputChanged ? 1.0 : 3.0  // Longer cooldown if output unchanged
+      
+      if timeSinceSent < cooldownTime {
+        // Too soon after sending password - don't re-detect
+        if session.isSSHSession {
+        }
+        return
+      }
+    }
+    
+    // Don't detect if we're currently sending a password
+    if isPasswordBeingSent {
+      return
+    }
+    
     // Check for password prompts from both sudo and SSH
     let output = session.output
     let lines = output.components(separatedBy: .newlines)
     let recentLines = lines.suffix(5).joined(separator: "\n")
     let recentLinesLower = recentLines.lowercased()
-
 
     // Check for sudo command in recent output (case-insensitive)
     let hasSudoCommand =
@@ -1312,37 +1791,89 @@ struct TerminalView: View {
       || recentLinesLower.hasPrefix("sudo") || recentLinesLower.contains("\nsudo")
 
     // Check for SSH session (look for SSH-specific patterns)
+    // More specific: look for the exact pattern "user@host's password:" or just "password:" at end of line
+    // Also check for variations like "user@host's password:" or "Password:" or "password:"
     let hasSSHSession =
       session.isSSHSession
-      || recentLinesLower.contains("@") && recentLinesLower.contains("'s password:")
-      || recentLinesLower.contains("password:") && !hasSudoCommand
+      || (recentLinesLower.contains("@") && (recentLinesLower.contains("'s password:") || recentLinesLower.contains(" password:")))
+      || (recentLinesLower.contains("password:") && !hasSudoCommand && !recentLinesLower.contains("permission denied"))
 
     // Check if the last non-empty line ends with a password prompt
     let lastNonEmptyLines = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
     let lastLine = lastNonEmptyLines.last?.lowercased() ?? ""
 
     // Password prompt patterns for both sudo and SSH
+    // For SSH, be more specific - look for the exact prompt pattern
     let hasSudoPasswordPrompt =
       hasSudoCommand && session.isProcessRunning
       && (lastLine.hasSuffix("password:") || lastLine.contains("password for")
         || recentLinesLower.contains("\npassword:") || recentLinesLower.contains("password for "))
 
+    // For SSH, check for the specific pattern: "user@host's password:" or just "password:" at end
+    // But exclude "Permission denied" messages which come AFTER failed authentication
+    // Also check if we see "Permission denied" - this means authentication failed and we should reset
+    let hasPermissionDenied = recentLinesLower.contains("permission denied")
+    
+    // If we see permission denied, reset password state to allow retry
+    if hasPermissionDenied && showPasswordInput {
+      // Reset password state but keep showing input for retry
+      isPasswordBeingSent = false
+      lastPasswordSentTime = nil
+      // Don't hide the password input - let user retry
+    }
+    
+    // More robust SSH password prompt detection
+    // Check for various formats: "user@host's password:", "Password:", "password:", etc.
     let hasSSHPasswordPrompt =
       hasSSHSession && session.isProcessRunning
-      && (lastLine.hasSuffix("password:") || lastLine.hasSuffix("'s password:")
-        || lastLine.contains("password:") || recentLinesLower.contains("'s password:"))
+      && !hasPermissionDenied
+      && (
+        lastLine.hasSuffix("password:") 
+        || lastLine.hasSuffix("'s password:")
+        || lastLine.hasSuffix(" password:")
+        || (lastLine.contains("password:") && !lastLine.contains("denied") && !lastLine.contains("authentication"))
+        || (recentLinesLower.contains("'s password:") && !recentLinesLower.contains("denied"))
+        || (recentLinesLower.contains("@") && recentLinesLower.contains("password:") && !recentLinesLower.contains("denied"))
+      )
 
     let hasPasswordPrompt = hasSudoPasswordPrompt || hasSSHPasswordPrompt
+    
+    // Debug: Log output when SSH session is active to help diagnose password prompt detection
+    if session.isSSHSession && session.isProcessRunning {
+      if showPasswordInput {
+        // After sending password, log what we're seeing
+      } else {
+      }
+    }
 
 
     // Check if password was accepted.
-    // Important: we no longer append the prompt to output, so do NOT rely on session.prompt presence.
-    // Consider password accepted when the password prompt disappears OR the process ends.
-    let passwordAccepted = showPasswordInput && (!hasPasswordPrompt || !session.isProcessRunning)
+    // For SSH, look for successful login indicators:
+    // - "logged in" message
+    // - Shell prompt appearing (like "hostname> " or "$ " or "# ")
+    // - Password prompt disappearing
+    let hasSuccessfulLogin = recentLinesLower.contains("logged in") || 
+                              recentLinesLower.contains("login:") ||
+                              (lastLine.contains("> ") && !lastLine.contains("password:")) ||
+                              (lastLine.contains("$ ") && !lastLine.contains("password:")) ||
+                              (lastLine.contains("# ") && !lastLine.contains("password:"))
+    
+    // Consider password accepted when:
+    // 1. Password prompt disappears AND we see successful login indicators, OR
+    // 2. Process ends, OR
+    // 3. Password prompt disappears and we see a shell prompt
+    let passwordAccepted = showPasswordInput && (
+      (hasSuccessfulLogin && !hasPasswordPrompt) ||
+      !session.isProcessRunning ||
+      (!hasPasswordPrompt && hasSuccessfulLogin)
+    )
 
     if hasPasswordPrompt {
       // Show password input if we detect a password prompt
+      // Only show if we haven't just sent a password (to avoid re-showing immediately)
       if !showPasswordInput {
+        // Reset the last sent time when showing a new prompt
+        lastPasswordSentTime = nil
         showPasswordInput = true
       }
       // Force focus on password field and bring window to front
@@ -1367,6 +1898,9 @@ struct TerminalView: View {
       // 2. Password was accepted (prompt is gone and we see output/prompt)
       showPasswordInput = false
       passwordInput = ""
+      lastPasswordSentTime = nil
+      isPasswordBeingSent = false
+      outputSnapshotWhenPasswordSent = ""
       // Restore focus to command field. Even if the process is still running
       // (after successful sudo/ssh), we want the caret visible in the command line.
       DispatchQueue.main.async {
@@ -1717,16 +2251,8 @@ struct SelectableTextView: NSViewRepresentable {
   var attributedString: AttributedString
   @Binding var selectedText: String
 
-  func makeNSView(context: Context) -> NSScrollView {
-    // Create a scroll view to contain the text view
-    let scrollView = NSScrollView()
-    scrollView.hasVerticalScroller = true
-    scrollView.hasHorizontalScroller = false
-    scrollView.autohidesScrollers = true
-    scrollView.borderType = .noBorder
-    scrollView.drawsBackground = false
-
-    // Create the text view
+  func makeNSView(context: Context) -> NSTextView {
+    // Create the text view directly
     let textView = NSTextView()
     textView.isEditable = false
     textView.isSelectable = true
@@ -1734,29 +2260,30 @@ struct SelectableTextView: NSViewRepresentable {
     textView.textContainerInset = .zero
     textView.delegate = context.coordinator
     textView.isAutomaticSpellingCorrectionEnabled = false
-
+    
     // Configure text container for proper layout
+    // Width tracks text view, Height is infinite to allow SwiftUI to scroll it
     if let textContainer = textView.textContainer {
       textContainer.widthTracksTextView = true
       textContainer.containerSize = NSSize(
         width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+      textContainer.lineFragmentPadding = 0 // Align closely with other views
     }
+    
     textView.isHorizontallyResizable = false
     textView.isVerticallyResizable = true
     textView.minSize = NSSize(width: 0, height: 0)
     textView.maxSize = NSSize(
       width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-    textView.autoresizingMask = [.width, .height]
-
-    // Set the text view as the document view
-    scrollView.documentView = textView
-
-    return scrollView
+    
+    // Key to allowing SwiftUI calculation: Autoresizing mask
+    textView.autoresizingMask = [.width]
+    
+    return textView
   }
 
-  func updateNSView(_ nsView: NSScrollView, context: Context) {
-    // Get the text view from the scroll view
-    guard let textView = nsView.documentView as? NSTextView else { return }
+  func updateNSView(_ nsView: NSTextView, context: Context) {
+    let textView = nsView
 
     // Convert SwiftUI AttributedString → NSAttributedString
     let nsAttributedString = NSAttributedString(attributedString)
@@ -1767,42 +2294,41 @@ struct SelectableTextView: NSViewRepresentable {
 
     // Only update if content actually changed to avoid cycles
     if currentString != newString {
-      // Update synchronously (we're already on main thread)
-      // Temporarily disable delegate to prevent feedback loops
+      let savedSelectedRange = textView.selectedRange
+      
+      // Update synchronously
       let oldDelegate = textView.delegate
       textView.delegate = nil
 
-      // Ensure the text view is properly configured
       textView.isEditable = false
       textView.isSelectable = true
-      textView.drawsBackground = false
 
-      // Set the attributed string
+      textStorage.beginEditing()
       textStorage.setAttributedString(nsAttributedString)
+      textStorage.endEditing()
 
-      // Ensure the text container is properly sized
-      if let textContainer = textView.textContainer {
-        textContainer.widthTracksTextView = true
-        textContainer.containerSize = NSSize(
-          width: nsView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+      // Restore selection if valid
+      if savedSelectedRange.length > 0 {
+        let maxLocation = textStorage.length
+        if savedSelectedRange.location < maxLocation {
+          let validLength = min(savedSelectedRange.length, maxLocation - savedSelectedRange.location)
+          textView.selectedRange = NSRange(location: savedSelectedRange.location, length: validLength)
+        }
       }
 
-      // Restore delegate
-      textView.delegate = oldDelegate
+      // Ensure layout
+      if let textContainer = textView.textContainer {
+         textContainer.containerSize = NSSize(
+           width: nsView.bounds.width, height: CGFloat.greatestFiniteMagnitude)
+         textView.layoutManager?.ensureLayout(for: textContainer)
+      }
 
-      // Force multiple types of updates
+      textView.delegate = oldDelegate
       textView.needsDisplay = true
       textView.needsLayout = true
-      textView.displayIfNeeded()
-
-      // Scroll to bottom to show latest output
-      if textStorage.length > 0 {
-        let range = NSRange(location: max(0, textStorage.length - 1), length: 1)
-        textView.scrollRangeToVisible(range)
-        // Also scroll the scroll view
-        let point = NSPoint(x: 0, y: max(0, textView.bounds.height - nsView.contentSize.height))
-        nsView.contentView.scroll(to: point)
-      }
+      
+      // Removed internal scrolling logic ("Yanking" fix)
+      // The outer ScrollViewReader now handles "follow tail" via the "formatted" output ID or "BOTTOM" ID
     }
   }
 
@@ -1944,25 +2470,21 @@ struct LineNumbersView: View {
     let raw = String(attributedText.characters)
     if raw.isEmpty { return "" }
 
-    let normalized =
-      raw
-      .replacingOccurrences(of: "\r\n", with: "\n")
-      .replacingOccurrences(of: "\r", with: "\n")
-
-    // Remove trailing newlines to avoid counting empty trailing lines
-    var trimmed = normalized
-    while trimmed.hasSuffix("\n") {
-      trimmed = String(trimmed.dropLast())
-    }
-
-    let segments = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
-
-    if segments.isEmpty {
-      return ""
-    }
-
-    return segments.enumerated()
-      .map { "\($0.offset + 1)" }
+    // Normalize only CRLF to LF, keep CRLF as one newline
+    let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
+    
+    // Split into components to find total count
+    let segments = normalized.components(separatedBy: "\n")
+    
+    // In our split view, the 'split.body' is the portion *before* the last line.
+    // However, split.body could itself end in a newline.
+    // If it ends in \n, components() gives an extra trailing empty string.
+    let count = normalized.hasSuffix("\n") ? max(0, segments.count - 1) : segments.count
+    
+    if count <= 0 { return "" }
+    
+    return (1...count)
+      .map { "\($0)" }
       .joined(separator: "\n")
   }
 }

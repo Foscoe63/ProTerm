@@ -97,7 +97,8 @@ final class CommandInputFocusController {
             return
         }
 
-        let shouldForceActivation = (reason == .startup)
+        // Force activation for startup and viewAppeared to ensure initial focus works
+        let shouldForceActivation = (reason == .startup || reason == .viewAppeared)
 
         if !NSApp.isActive && !shouldForceActivation {
             log("requestFocus skipped (inactive app) session=\(targetID.uuidString) reason=\(reason.rawValue)")
@@ -113,7 +114,23 @@ final class CommandInputFocusController {
         }
 
         log("requestFocus start session=\(targetID.uuidString) reason=\(reason.rawValue)")
-        logFocusSnapshot("request.start", window: window, field: field, editor: window.fieldEditor(false, for: field) as? NSTextView)
+        let existingEditor = window.fieldEditor(false, for: field) as? NSTextView
+        logFocusSnapshot("request.start", window: window, field: field, editor: existingEditor)
+        
+        // Check if editor is already the first responder - if so, just ensure cursor is visible
+        if let editor = existingEditor, window.firstResponder === editor {
+            log("editor already first responder, ensuring cursor visibility")
+            editor.updateInsertionPointStateAndRestartTimer(true)
+            editor.needsDisplay = true
+            // Also set cursor visible on CustomFieldEditor
+            if let customEditor = editor as? CustomFieldEditor {
+                customEditor.cursorVisible = true
+                customEditor.needsDisplay = true
+            }
+            log("requestFocus completed session=\(targetID.uuidString)")
+            return
+        }
+        
         let fieldResponder = window.makeFirstResponder(field)
         log("window.makeFirstResponder(field) \(fieldResponder ? "succeeded" : "failed")")
         if fieldResponder {
@@ -129,18 +146,95 @@ final class CommandInputFocusController {
     }
 
     private func activateEditing(for field: CustomNSTextField, in window: NSWindow) {
+        // Check if editor is already active
+        if let existingEditor = field.currentEditor() as? NSTextView,
+           window.firstResponder === existingEditor {
+            // Editor is already active - just ensure cursor visibility
+            log("activateEditing: editor already active, ensuring cursor")
+            existingEditor.updateInsertionPointStateAndRestartTimer(true)
+            existingEditor.setNeedsDisplay(existingEditor.bounds)
+            if let customEditor = existingEditor as? CustomFieldEditor {
+                customEditor.cursorVisible = true
+                customEditor.setNeedsDisplay(customEditor.bounds)
+            }
+            return
+        }
+        
+        // First, ensure the custom cell is set up
+        if !(field.cell is CustomTextFieldCell) {
+            let customCell = CustomTextFieldCell(textCell: field.stringValue)
+            customCell.cursorStyle = field.cursorStyle
+            customCell.cursorBlinking = field.cursorBlinking
+            field.cell = customCell
+            log("activateEditing: installed CustomTextFieldCell")
+        }
+        
+        // Use selectText(nil) to start editing
         field.selectText(nil)
-        if let editor = window.fieldEditor(true, for: field) as? NSTextView {
+        log("activateEditing: called selectText(nil)")
+        
+        // Check if editing started, if not try cell's select method
+        if field.currentEditor() == nil {
+            if let customCell = field.cell as? CustomTextFieldCell,
+               let editor = customCell.fieldEditor(for: field) {
+                // Manually start editing using the cell
+                customCell.select(withFrame: field.bounds,
+                                  in: field,
+                                  editor: editor,
+                                  delegate: field,
+                                  start: 0,
+                                  length: 0)
+                log("activateEditing: used cell.select() fallback")
+            }
+        }
+        
+        // After selectText, the editor should be available - set up cursor
+        DispatchQueue.main.async { [weak self, weak field] in
+            guard let self = self, let field = field, let window = field.window else { return }
+            if let editor = field.currentEditor() as? NSTextView {
+                editor.selectedRange = NSRange(location: editor.string.count, length: 0)
+                editor.updateInsertionPointStateAndRestartTimer(true)
+                editor.setNeedsDisplay(editor.bounds)
+                if let customEditor = editor as? CustomFieldEditor {
+                    customEditor.cursorVisible = true
+                    customEditor.setNeedsDisplay(customEditor.bounds)
+                }
+                self.log("activateEditing: cursor setup complete")
+            } else {
+                self.log("activateEditing: no editor after selectText, retrying")
+                self.setupEditorCursor(for: field, in: window, attempt: 1)
+            }
+        }
+    }
+    
+    private func setupEditorCursor(for field: CustomNSTextField, in window: NSWindow, attempt: Int) {
+        // Only use currentEditor - this is the ACTIVE editor that's properly attached
+        if let editor = field.currentEditor() as? NSTextView {
             if editor.string.isEmpty {
                 editor.selectedRange = NSRange(location: 0, length: 0)
             } else {
                 editor.selectedRange = NSRange(location: editor.string.count, length: 0)
             }
-            let editorResponder = window.makeFirstResponder(editor)
-            log("window.makeFirstResponder(editor) \(editorResponder ? "succeeded" : "failed")")
+            // Force cursor display
+            editor.updateInsertionPointStateAndRestartTimer(true)
+            editor.setNeedsDisplay(editor.bounds)
+            // Also set cursorVisible on CustomFieldEditor
+            if let customEditor = editor as? CustomFieldEditor {
+                customEditor.cursorVisible = true
+                customEditor.setNeedsDisplay(customEditor.bounds)
+            }
+            log("setupEditorCursor succeeded on attempt \(attempt)")
             logFocusSnapshot("editor.activation", window: window, field: field, editor: editor)
+        } else if attempt < 5 {
+            // Editor not ready - try selectText and retry
+            log("setupEditorCursor attempt \(attempt) failed, retrying with selectText")
+            field.selectText(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1 * Double(attempt)) { [weak self, weak field] in
+                guard let self = self, let field = field, let window = field.window else { return }
+                self.setupEditorCursor(for: field, in: window, attempt: attempt + 1)
+            }
         } else {
-            log("activateEditing editor still missing")
+            log("setupEditorCursor failed after \(attempt) attempts")
         }
     }
 

@@ -7,7 +7,6 @@ struct PreferencesView: View {
     @EnvironmentObject var terminalManager: TerminalManager
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var shellManager: ShellManager
-    @EnvironmentObject var lineNumbersManager: LineNumbersManager
     @EnvironmentObject var fontManager: FontManager
     @EnvironmentObject var advancedFeatures: AdvancedFeatures
     @EnvironmentObject var productivityTools: ProductivityTools
@@ -1158,12 +1157,16 @@ struct QuickCommandsSettings: View {
     @State private var commandName: String = ""
     @State private var commandText: String = ""
     @State private var commandDescription: String = ""
-    @State private var selectedCategory: ProductivityTools.QuickCommand.QuickCommandCategory = .custom
+    @State private var selectedCategory: String = ProductivityTools.QuickCommand.BuiltInCategory.custom.rawValue
     @State private var commandIcon: String = "terminal"
     @State private var requiresKeyword: Bool = false
     @State private var keywordPlaceholder: String = ""
     @State private var editingCommand: ProductivityTools.QuickCommand? = nil
-    @State private var selectedCategoryFilter: ProductivityTools.QuickCommand.QuickCommandCategory? = nil
+    @State private var selectedCategoryFilter: String? = nil
+    
+    // Category management
+    @State private var newCategoryName: String = ""
+    @State private var showingAddCategory = false
     
     var filteredCommands: [ProductivityTools.QuickCommand] {
         if let filter = selectedCategoryFilter {
@@ -1172,7 +1175,7 @@ struct QuickCommandsSettings: View {
         return productivityTools.quickCommands
     }
     
-    var commandsByCategory: [ProductivityTools.QuickCommand.QuickCommandCategory: [ProductivityTools.QuickCommand]] {
+    var commandsByCategory: [String: [ProductivityTools.QuickCommand]] {
         Dictionary(grouping: filteredCommands) { $0.category }
     }
     
@@ -1189,15 +1192,112 @@ struct QuickCommandsSettings: View {
                 
                 Divider()
                 
+                // Category Management
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Categories")
+                            .font(.headline)
+                        Spacer()
+                        Button(action: { showingAddCategory = true }) {
+                            Image(systemName: "plus.circle.fill")
+                            Text("Add Category")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    
+                    // Built-in categories (read-only)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Built-in Categories")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        FlowLayout(spacing: 8) {
+                            ForEach(productivityTools.getAllCategories().filter { productivityTools.isBuiltInCategory($0) }, id: \.self) { category in
+                                HStack(spacing: 4) {
+                                    Text(category)
+                                    Image(systemName: "lock.fill")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color(NSColor.controlBackgroundColor))
+                                .cornerRadius(6)
+                            }
+                        }
+                    }
+                    
+                    // Custom categories (with delete button)
+                    if !productivityTools.customCategories.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Custom Categories")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            FlowLayout(spacing: 8) {
+                                ForEach(productivityTools.customCategories, id: \.self) { category in
+                                    HStack(spacing: 4) {
+                                        Text(category)
+                                        Button(action: {
+                                            if productivityTools.canRemoveCategory(category) {
+                                                _ = productivityTools.removeCustomCategory(category)
+                                            }
+                                        }) {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.caption2)
+                                                .foregroundColor(.red)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help(productivityTools.canRemoveCategory(category) ? "Remove category" : "Cannot remove: category has commands")
+                                        .disabled(!productivityTools.canRemoveCategory(category))
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color(NSColor.controlBackgroundColor))
+                                    .cornerRadius(6)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding()
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+                .sheet(isPresented: $showingAddCategory) {
+                    VStack(spacing: 16) {
+                        Text("Add Custom Category")
+                            .font(.headline)
+                        TextField("Category name", text: $newCategoryName)
+                            .textFieldStyle(.roundedBorder)
+                        HStack {
+                            Button("Cancel") {
+                                showingAddCategory = false
+                                newCategoryName = ""
+                            }
+                            .buttonStyle(.bordered)
+                            Button("Add") {
+                                productivityTools.addCustomCategory(newCategoryName)
+                                showingAddCategory = false
+                                newCategoryName = ""
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(newCategoryName.trimmingCharacters(in: .whitespaces).isEmpty)
+                        }
+                    }
+                    .padding()
+                    .frame(width: 300)
+                }
+                
+                Divider()
+                
                 // Category filter
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Filter by Category")
                         .font(.headline)
                     
                     Picker("Category", selection: $selectedCategoryFilter) {
-                        Text("All Categories").tag(nil as ProductivityTools.QuickCommand.QuickCommandCategory?)
-                        ForEach(ProductivityTools.QuickCommand.QuickCommandCategory.allCases, id: \.self) { category in
-                            Text(category.rawValue).tag(category as ProductivityTools.QuickCommand.QuickCommandCategory?)
+                        Text("All Categories").tag(nil as String?)
+                        ForEach(productivityTools.getAllCategories(), id: \.self) { category in
+                            Text(category).tag(category as String?)
                         }
                     }
                     .pickerStyle(.menu)
@@ -1235,8 +1335,8 @@ struct QuickCommandsSettings: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Category:")
                             Picker("Category", selection: $selectedCategory) {
-                                ForEach(ProductivityTools.QuickCommand.QuickCommandCategory.allCases, id: \.self) { category in
-                                    Text(category.rawValue).tag(category)
+                                ForEach(productivityTools.getAllCategories(), id: \.self) { category in
+                                    Text(category).tag(category)
                                 }
                             }
                             .pickerStyle(.menu)
@@ -1318,9 +1418,9 @@ struct QuickCommandsSettings: View {
                             .foregroundColor(.secondary)
                             .padding()
                     } else {
-                        ForEach(Array(commandsByCategory.keys.sorted(by: { $0.rawValue < $1.rawValue })), id: \.self) { category in
+                        ForEach(commandsByCategory.keys.sorted(), id: \.self) { category in
                             VStack(alignment: .leading, spacing: 8) {
-                                Text(category.rawValue)
+                                Text(category)
                                     .font(.headline)
                                     .foregroundColor(.primary)
                                     .padding(.top, 8)
@@ -1434,7 +1534,7 @@ struct QuickCommandsSettings: View {
         commandName = ""
         commandText = ""
         commandDescription = ""
-        selectedCategory = .custom
+        selectedCategory = ProductivityTools.QuickCommand.BuiltInCategory.custom.rawValue
         commandIcon = "terminal"
         requiresKeyword = false
         keywordPlaceholder = ""
@@ -1923,18 +2023,30 @@ struct AddEditSSHConnectionSheet: View {
                     .keyboardShortcut(.escape)
                 Button("Save", action: {
                     if isEditing, let conn = connection {
-                        // Update existing connection - remove old password
-                        integrationFeatures.removeSSHConnection(conn)
+                        // Update existing connection - preserve ID and password
+                        let passwordToSave = usePassword && !password.isEmpty ? password : nil
+                        integrationFeatures.updateSSHConnection(
+                            id: conn.id,
+                            name: name,
+                            host: host,
+                            port: port,
+                            username: username,
+                            keyPath: usePassword ? nil : selectedKeyPath,
+                            usesPassword: usePassword,
+                            password: passwordToSave
+                        )
+                    } else {
+                        // Add new connection
+                        let passwordToSave = usePassword && !password.isEmpty ? password : nil
+                        integrationFeatures.addSSHConnection(
+                            name: name,
+                            host: host,
+                            port: port,
+                            username: username,
+                            keyPath: usePassword ? nil : selectedKeyPath,
+                            password: passwordToSave
+                        )
                     }
-                    let passwordToSave = usePassword && !password.isEmpty ? password : nil
-                    integrationFeatures.addSSHConnection(
-                        name: name,
-                        host: host,
-                        port: port,
-                        username: username,
-                        keyPath: usePassword ? nil : selectedKeyPath,
-                        password: passwordToSave
-                    )
                     password = "" // Clear password from memory
                     onSave()
                 })
@@ -2052,5 +2164,60 @@ struct PreferencesView_Previews: PreviewProvider {
         PreferencesView()
             .environmentObject(TerminalManager())
             .environmentObject(ThemeManager())
+    }
+}
+
+// MARK: - FlowLayout Helper
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = FlowResult(
+            in: proposal.replacingUnspecifiedDimensions().width,
+            subviews: subviews,
+            spacing: spacing
+        )
+        return result.size
+    }
+    
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = FlowResult(
+            in: bounds.width,
+            subviews: subviews,
+            spacing: spacing
+        )
+        for (index, subview) in subviews.enumerated() {
+            subview.place(at: CGPoint(x: bounds.minX + result.frames[index].minX,
+                                     y: bounds.minY + result.frames[index].minY),
+                         proposal: .unspecified)
+        }
+    }
+    
+    struct FlowResult {
+        var size: CGSize = .zero
+        var frames: [CGRect] = []
+        
+        init(in maxWidth: CGFloat, subviews: Subviews, spacing: CGFloat) {
+            var currentX: CGFloat = 0
+            var currentY: CGFloat = 0
+            var lineHeight: CGFloat = 0
+            
+            for subview in subviews {
+                let size = subview.sizeThatFits(.unspecified)
+                
+                if currentX + size.width > maxWidth && currentX > 0 {
+                    // Move to next line
+                    currentX = 0
+                    currentY += lineHeight + spacing
+                    lineHeight = 0
+                }
+                
+                frames.append(CGRect(x: currentX, y: currentY, width: size.width, height: size.height))
+                currentX += size.width + spacing
+                lineHeight = max(lineHeight, size.height)
+            }
+            
+            self.size = CGSize(width: maxWidth, height: currentY + lineHeight)
+        }
     }
 }

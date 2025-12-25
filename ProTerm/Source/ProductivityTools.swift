@@ -16,6 +16,7 @@ class ProductivityTools: NSObject, ObservableObject {
         loadQuickCommands()
         loadSessionTemplates()
         loadOutputFilters()
+        loadCustomCategories()
         setupDefaultData()
     }
     
@@ -46,12 +47,16 @@ class ProductivityTools: NSObject, ObservableObject {
     @Published var quickCommands: [QuickCommand] = []
     private let quickCommandsKey = "ProTermQuickCommands"
     
+    // MARK: - Custom Categories
+    @Published var customCategories: [String] = []
+    private let customCategoriesKey = "ProTermCustomCategories"
+    
     struct QuickCommand: Identifiable, Codable, Equatable {
         let id: UUID
         var name: String
         var command: String
         var description: String?
-        var category: QuickCommandCategory
+        var category: String  // Changed from enum to String to support custom categories
         var icon: String
         var created: Date
         var lastUsed: Date?
@@ -59,12 +64,25 @@ class ProductivityTools: NSObject, ObservableObject {
         var requiresKeyword: Bool
         var keywordPlaceholder: String? // e.g., "directory name" for cd command
         
+        // Built-in category constants
+        enum BuiltInCategory: String, CaseIterable {
+            case fileSystem = "File System"
+            case git = "Git"
+            case docker = "Docker"
+            case npm = "NPM"
+            case system = "System"
+            case ssh = "SSH"
+            case custom = "Custom"
+        }
+        
+        // Legacy enum for backward compatibility during migration
         enum QuickCommandCategory: String, CaseIterable, Codable {
             case fileSystem = "File System"
             case git = "Git"
             case docker = "Docker"
             case npm = "NPM"
             case system = "System"
+            case ssh = "SSH"
             case custom = "Custom"
         }
     }
@@ -196,7 +214,7 @@ class ProductivityTools: NSObject, ObservableObject {
     
     // MARK: - Quick Commands Management
     
-    func addQuickCommand(name: String, command: String, description: String? = nil, category: QuickCommand.QuickCommandCategory = .custom, icon: String = "terminal", requiresKeyword: Bool = false, keywordPlaceholder: String? = nil) {
+    func addQuickCommand(name: String, command: String, description: String? = nil, category: String = QuickCommand.BuiltInCategory.custom.rawValue, icon: String = "terminal", requiresKeyword: Bool = false, keywordPlaceholder: String? = nil) {
         let quickCommand = QuickCommand(
             id: UUID(),
             name: name,
@@ -281,7 +299,7 @@ class ProductivityTools: NSObject, ObservableObject {
                             name: old.name,
                             command: old.command,
                             description: old.description,
-                            category: old.category,
+                            category: old.category.rawValue,  // Convert enum to string
                             icon: migrateIconName(old.icon),
                             created: old.created,
                             lastUsed: old.lastUsed,
@@ -530,6 +548,69 @@ class ProductivityTools: NSObject, ObservableObject {
     
     // MARK: - Default Data Setup
     
+    // MARK: - Custom Categories Management
+    
+    func getAllCategories() -> [String] {
+        let builtInCategories = QuickCommand.BuiltInCategory.allCases.map { $0.rawValue }
+        return builtInCategories + customCategories
+    }
+    
+    func isBuiltInCategory(_ categoryName: String) -> Bool {
+        return QuickCommand.BuiltInCategory.allCases.contains { $0.rawValue == categoryName }
+    }
+    
+    func addCustomCategory(_ name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmedName.isEmpty,
+              !customCategories.contains(trimmedName),
+              !isBuiltInCategory(trimmedName) else {
+            return
+        }
+        customCategories.append(trimmedName)
+        saveCustomCategories()
+    }
+    
+    func removeCustomCategory(_ name: String) -> Bool {
+        // Built-in categories cannot be removed
+        if isBuiltInCategory(name) {
+            return false
+        }
+        
+        // Check if any commands use this category
+        let commandsUsingCategory = quickCommands.filter { $0.category == name }
+        if !commandsUsingCategory.isEmpty {
+            return false // Can't remove - has commands
+        }
+        
+        if let index = customCategories.firstIndex(of: name) {
+            customCategories.remove(at: index)
+            saveCustomCategories()
+            return true
+        }
+        return false
+    }
+    
+    func canRemoveCategory(_ name: String) -> Bool {
+        // Built-in categories cannot be removed
+        if isBuiltInCategory(name) {
+            return false
+        }
+        
+        // Check if any commands use this category
+        let commandsUsingCategory = quickCommands.filter { $0.category == name }
+        return commandsUsingCategory.isEmpty
+    }
+    
+    private func loadCustomCategories() {
+        if let categories = UserDefaults.standard.stringArray(forKey: customCategoriesKey) {
+            customCategories = categories
+        }
+    }
+    
+    private func saveCustomCategories() {
+        UserDefaults.standard.set(customCategories, forKey: customCategoriesKey)
+    }
+    
     private func setupDefaultData() {
         if bookmarks.isEmpty {
             addBookmark(name: "Home", path: NSHomeDirectory(), description: "User home directory", category: .personal)
@@ -538,12 +619,12 @@ class ProductivityTools: NSObject, ObservableObject {
         }
         
         if quickCommands.isEmpty {
-            addQuickCommand(name: "List All", command: "ls -la", description: "List all files with details", category: .fileSystem, icon: "list.bullet", requiresKeyword: false)
-            addQuickCommand(name: "Git Status", command: "git status", description: "Show git status", category: .git, icon: "arrow.triangle.branch", requiresKeyword: false)
-            addQuickCommand(name: "Docker PS", command: "docker ps", description: "List running containers", category: .docker, icon: "cube.box", requiresKeyword: false)
-            addQuickCommand(name: "NPM Install", command: "npm install", description: "Install dependencies", category: .npm, icon: "shippingbox", requiresKeyword: false)
-            addQuickCommand(name: "System Info", command: "uname -a", description: "Show system information", category: .system, icon: "info.circle", requiresKeyword: false)
-            addQuickCommand(name: "Change Directory", command: "cd", description: "Change to directory", category: .fileSystem, icon: "folder", requiresKeyword: true, keywordPlaceholder: "directory name")
+            addQuickCommand(name: "List All", command: "ls -la", description: "List all files with details", category: QuickCommand.BuiltInCategory.fileSystem.rawValue, icon: "list.bullet", requiresKeyword: false)
+            addQuickCommand(name: "Git Status", command: "git status", description: "Show git status", category: QuickCommand.BuiltInCategory.git.rawValue, icon: "arrow.triangle.branch", requiresKeyword: false)
+            addQuickCommand(name: "Docker PS", command: "docker ps", description: "List running containers", category: QuickCommand.BuiltInCategory.docker.rawValue, icon: "cube.box", requiresKeyword: false)
+            addQuickCommand(name: "NPM Install", command: "npm install", description: "Install dependencies", category: QuickCommand.BuiltInCategory.npm.rawValue, icon: "shippingbox", requiresKeyword: false)
+            addQuickCommand(name: "System Info", command: "uname -a", description: "Show system information", category: QuickCommand.BuiltInCategory.system.rawValue, icon: "info.circle", requiresKeyword: false)
+            addQuickCommand(name: "Change Directory", command: "cd", description: "Change to directory", category: QuickCommand.BuiltInCategory.fileSystem.rawValue, icon: "folder", requiresKeyword: true, keywordPlaceholder: "directory name")
         }
         
         if sessionTemplates.isEmpty {

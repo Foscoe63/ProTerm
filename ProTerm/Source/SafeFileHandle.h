@@ -1,21 +1,22 @@
-#import <Foundation/Foundation.h>
+#ifndef SAFE_FILE_HANDLE_H
+#define SAFE_FILE_HANDLE_H
 
-NS_ASSUME_NONNULL_BEGIN
+#include <sys/types.h>
 
-NSData* _Nullable safeReadAvailableData(NSFileHandle* handle);
-
-// C shim for variadic-unavailable ioctl(TIOCSWINSZ)
-// Returns 0 on success, -1 on failure (errno set by ioctl)
-int proterm_set_winsize(int fd, unsigned short rows, unsigned short cols);
+// C-only header for PTY helpers.
+// Standard POSIX/BSD types are used for maximum compatibility with Swift.
 
 // Spawn an interactive command attached to a PTY using forkpty.
-// Returns child PID on success (>= 1) and sets *out_master_fd to the master PTY fd.
-// Returns -1 on failure; *out_master_fd is undefined on failure.
-int proterm_forkpty_spawn(const char* shell_path,
-                          const char* command,
-                          int* out_master_fd,
-                          unsigned short rows,
+int proterm_forkpty_spawn(const char *shell_path, const char *command,
+                          int *out_master_fd, unsigned short rows,
                           unsigned short cols);
 
-NS_ASSUME_NONNULL_END
+// Direct exec version (no shell)
+int proterm_forkpty_exec(const char *command_path, char *const argv[],
+                         char *const envv[], int *out_master_fd,
+                         unsigned short rows, unsigned short cols);
 
+// Terminal resize helper
+int proterm_set_winsize(int fd, unsigned short rows, unsigned short cols);
+
+#endif

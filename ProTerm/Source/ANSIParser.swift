@@ -7,7 +7,7 @@ struct ANSIParser {
     
     /// Parse ANSI escape codes and return attributed text
     static func parse(_ text: String, baseFont: Font = .custom("Menlo", size: 12)) -> AttributedString {
-        let normalized = normalizeControlCharacters(text)
+        let (normalized, _) = normalizeControlCharacters(text)
         var attributedString = AttributedString()
         var currentAttributes = AttributeContainer()
         currentAttributes.font = baseFont
@@ -25,6 +25,9 @@ struct ANSIParser {
                     if let result = readCSISequence(in: normalized, start: next) {
                         if result.finalChar == "m" {
                             currentAttributes = parseEscapeCode(result.parameters, currentAttributes: currentAttributes, baseFont: baseFont)
+                        } else if result.finalChar == "J" {
+                            // IGNORE ALL Clear Screen commands (CSI J, CSI 2 J, CSI 3 J)
+                            // Forces log-mode behavior for Cisco/legacy compatibility.
                         }
                         cursor = normalized.index(after: result.endIndex)
                     } else {
@@ -112,45 +115,71 @@ struct ANSIParser {
         }
     }
     
-    /// Normalize carriage return (\r), backspace (\b) and CRLF sequences to approximate macOS Terminal rendering
-    /// - Behavior:
-    ///   - "\r" moves the cursor to the start of the current line; following text overwrites that line
-    ///   - "\b" removes the previous character (if any)
-    ///   - CRLF ("\r\n") is normalized to a single newline to avoid introducing blank lines
-    static func normalizeControlCharacters(_ text: String) -> String {
+    static func normalizeControlCharacters(_ text: String, pendingCR: Bool = false) -> (String, Bool) {
         var buffer = String()
         buffer.reserveCapacity(text.count)
         var i = text.startIndex
+        var atStartOfLine = pendingCR // Stateful: cursor moved to start of line, waiting to overwrite
+        
         while i < text.endIndex {
             let ch = text[i]
+            
             if ch == "\r" {
-                // If next is \n, treat as newline and consume both
+                // If next is \n, it's a standard newline sequence.
                 let nextIndex = text.index(after: i)
                 if nextIndex < text.endIndex, text[nextIndex] == "\n" {
+                    if atStartOfLine {
+                        clearCurrentLine(&buffer)
+                        atStartOfLine = false
+                    }
                     buffer.append("\n")
                     i = text.index(after: nextIndex)
                     continue
                 }
-                // Carriage return: erase current line content from its start
-                if let lastNewline = buffer.lastIndex(of: "\n") {
-                    buffer.removeSubrange(buffer.index(after: lastNewline)..<buffer.endIndex)
-                } else {
-                    buffer.removeAll(keepingCapacity: true)
-                }
+                
+                atStartOfLine = true
                 i = text.index(after: i)
                 continue
+            } else if ch == "\n" {
+                if atStartOfLine {
+                    clearCurrentLine(&buffer)
+                    atStartOfLine = false
+                }
+                buffer.append("\n")
+                i = text.index(after: i)
             } else if ch == "\u{0008}" { // backspace
                 if !buffer.isEmpty, buffer.last != "\n" {
                     buffer.removeLast()
                 }
+                atStartOfLine = false
                 i = text.index(after: i)
-                continue
+            } else if ch == "\u{000C}" { // form feed
+                if atStartOfLine {
+                    clearCurrentLine(&buffer)
+                    atStartOfLine = false
+                }
+                buffer.append("\n\n-- Page Break --\n\n")
+                i = text.index(after: i)
+            } else if ch == "\u{0007}" { // bell
+                i = text.index(after: i)
             } else {
+                if atStartOfLine {
+                    clearCurrentLine(&buffer)
+                    atStartOfLine = false
+                }
                 buffer.append(ch)
                 i = text.index(after: i)
             }
         }
-        return buffer
+        return (buffer, atStartOfLine)
+    }
+    
+    private static func clearCurrentLine(_ buffer: inout String) {
+        if let lastNewline = buffer.lastIndex(of: "\n") {
+            buffer.removeSubrange(buffer.index(after: lastNewline)..<buffer.endIndex)
+        } else {
+            buffer.removeAll()
+        }
     }
     
     /// Parse a single ANSI escape code

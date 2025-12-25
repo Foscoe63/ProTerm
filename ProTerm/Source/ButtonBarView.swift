@@ -5,7 +5,6 @@ struct ButtonBarView: View {
     @EnvironmentObject var terminalManager: TerminalManager
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var shellManager: ShellManager
-    @EnvironmentObject var lineNumbersManager: LineNumbersManager
     @EnvironmentObject var productivityTools: ProductivityTools
     @EnvironmentObject var advancedFeatures: AdvancedFeatures
     @EnvironmentObject var fontManager: FontManager
@@ -70,6 +69,8 @@ struct ButtonBarView: View {
             systemInfoButton
             toolbarDivider
             aiChatbotButton
+            toolbarDivider
+            lineNumbersToggleButton
             toolbarDivider
             preferencesButton
             Spacer()
@@ -186,6 +187,16 @@ struct ButtonBarView: View {
         ToolbarButton(icon: "sparkles", help: "AI Chatbot", iconColor: .pink, action: { showingChatbot.toggle() })
     }
     
+    private var lineNumbersToggleButton: some View {
+        ToolbarButton(
+            icon: "list.number",
+            help: "Toggle Line Numbers",
+            isActive: terminalVisualSettings.showLineNumbers,
+            iconColor: terminalVisualSettings.showLineNumbers ? .blue : .gray,
+            action: { terminalVisualSettings.showLineNumbers.toggle() }
+        )
+    }
+    
     private var preferencesButton: some View {
         ToolbarButton(icon: "gearshape", help: "Preferences…", iconColor: .gray, action: { showingPreferences.toggle() })
     }
@@ -195,7 +206,6 @@ struct ButtonBarView: View {
             .environmentObject(terminalManager)
             .environmentObject(themeManager)
             .environmentObject(shellManager)
-            .environmentObject(lineNumbersManager)
             .environmentObject(productivityTools)
             .environmentObject(advancedFeatures)
             .environmentObject(fontManager)

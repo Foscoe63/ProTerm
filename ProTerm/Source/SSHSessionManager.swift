@@ -50,68 +50,24 @@ final class SSHSessionManager: @unchecked Sendable {
     let session = TerminalSession(shellManager: shellManager)
 
     // -----------------------------------------------------------------
-    // Build the ssh command line that will be executed via PTYWrapper.
+    // Build the ssh command using a dedicated builder (unifies logic).
     // -----------------------------------------------------------------
-    var execPath = "/usr/bin/ssh"
-    var args: [String] = []
-
-    // Allocate a PTY on the remote side so we get an interactive shell.
-    args.append("-tt")
-
-    // Keep the connection alive
-    args.append("-o")
-    args.append("ServerAliveInterval=60")
-    args.append("-o")
-    args.append("ServerAliveCountMax=3")
-
-    // Ensure interactive mode
-    args.append("-o")
-    args.append("BatchMode=no")
-
-    // Don't prompt for host key verification
-    args.append("-o")
-    args.append("StrictHostKeyChecking=no")
-
-    // Limit password attempts
-    args.append("-o")
-    args.append("NumberOfPasswordPrompts=3")
-
-    // Connection timeout
-    args.append("-o")
-    args.append("ConnectTimeout=30")
-
-    // Prefer password authentication if password is provided or generally
-    args.append("-o")
-    args.append("PreferredAuthentications=password,publickey,keyboard-interactive")
-
-    // Port flag (if supplied and not default 22).
-    if let p = port, p != 22 {
-      args += ["-p", String(p)]
-    }
-
-    // SSH key file (if supplied).
-    if let key = keyPath, !key.isEmpty, FileManager.default.fileExists(atPath: key) {
-      args += ["-i", key]
-    }
-
-    // Username flag (if supplied).
-    if let u = user { args += ["-l", u] }
-
-    // Password handling – prefer sshpass when it exists.
-    if let pwd = password {
-      let possible = [
-        "/usr/local/bin/sshpass",
-        "/opt/homebrew/bin/sshpass",
-        "/usr/bin/sshpass",
-      ]
-      if let sshpass = possible.first(where: { FileManager.default.fileExists(atPath: $0) }) {
-        execPath = sshpass
-        args.append(contentsOf: ["-p", pwd, "ssh"])
-      }
-    }
-
-    // Finally the host argument.
-    args.append(host)
+    let builder = SSHArgsBuilder()
+    let opts = SSHArgsBuilder.Options(
+      host: host,
+      user: user,
+      port: port,
+      identityFile: keyPath,
+      password: password,
+      strictHostKeyChecking: false,
+      serverAliveInterval: 60,
+      serverAliveCountMax: 3,
+      connectTimeout: 30,
+      preferredAuthentications: "password,publickey,keyboard-interactive"
+    )
+    let cmd = builder.build(opts)
+    let execPath = cmd.execPath
+    let args = cmd.args
 
     // -----------------------------------------------------------------
     // Launch the command via PTYWrapper.
@@ -120,14 +76,20 @@ final class SSHSessionManager: @unchecked Sendable {
     // Set up environment for SSH
     // SSH_ASKPASS: Path to helper script that will prompt for password
     // DISPLAY: Required for SSH_ASKPASS to work
-    // TERM: Terminal type
+    // TERM: Terminal type. Using 'xterm' instead of 'xterm-256color'
+    // for better compatibility with older Cisco/ASA devices.
     let askpassPath = Bundle.main.path(forResource: "ssh-askpass", ofType: "sh") ?? ""
-    let sshEnv = [
-      "TERM": "xterm-256color",
+    var sshEnv = [
+      "TERM": "xterm",
       "SSH_ASKPASS": askpassPath,
       "DISPLAY": ":0",
       "SSH_ASKPASS_REQUIRE": "force",
     ]
+
+    // If a password is provided, pass it in the environment so the askpass script can use it
+    if let pwd = password, !pwd.isEmpty {
+      sshEnv["PROTERM_SSH_PASSWORD"] = pwd
+    }
 
 
     let handler = PTYWrapper(command: execPath, args: args, env: sshEnv)
@@ -141,12 +103,11 @@ final class SSHSessionManager: @unchecked Sendable {
     // PTYWrapper is now @unchecked Sendable, so passing it is safe
     // isSSH=true completely disables IO features for SSH sessions
 
-    // Use a semaphore to wait for MainActor task completion
+    // Use a semaphore to wait for main-thread setup completion
     let semaphore = DispatchSemaphore(value: 0)
 
-    Task { @MainActor in
+    DispatchQueue.main.async {
       session.attachPTY(handler, isSSH: true)
-
 
       handler.startReading { [sessionId] text in
         DispatchQueue.main.async {
@@ -154,7 +115,6 @@ final class SSHSessionManager: @unchecked Sendable {
             name: .sshPTYOutput, object: sessionId, userInfo: ["text": text])
         }
       }
-
 
       semaphore.signal()
     }

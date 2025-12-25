@@ -1,12 +1,11 @@
-#!/bin/bash
-# SSH_ASKPASS helper for ProTerm
-# This script is called by SSH to get the password
+# Check if password is provided via environment variable
+if [ ! -z "$PROTERM_SSH_PASSWORD" ]; then
+    echo "$PROTERM_SSH_PASSWORD"
+    exit 0
+fi
 
-# Read the prompt from SSH (passed as argument)
+# Fallback to osascript dialog if no environment variable is set
 PROMPT="$1"
-
-# Use osascript to show a password dialog
 PASSWORD=$(/usr/bin/osascript -e 'Tell application "System Events" to display dialog "'"$PROMPT"'" default answer "" with hidden answer' -e 'text returned of result' 2>/dev/null)
 
-# Output the password to stdout (SSH reads it from here)
 echo "$PASSWORD"

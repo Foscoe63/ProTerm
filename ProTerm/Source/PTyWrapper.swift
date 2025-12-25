@@ -47,14 +47,16 @@ final class PTYWrapper: @unchecked Sendable {
         let slave = open(slavePath, O_RDWR)
         guard slave != -1 else { fatalError("open slave failed") }
         
-        // 4.5️⃣ Configure terminal attributes on slave BEFORE spawning
-        // For SSH, we need raw mode for proper interactive operation
-        // SSH handles its own terminal configuration for password prompts and remote shell
+        // Standard terminal attributes are obtained. 
+        // We set the TTY to raw mode to disable local echo and line editing,
+        // as ProTerm handles these locally via its UI components.
         var tio = termios()
         if tcgetattr(slave, &tio) == 0 {
-            // Use raw mode for SSH - this is critical for proper operation
             cfmakeraw(&tio)
-            // Set terminal attributes
+            // Ensure we don't map CR to NL or vice versa on input/output
+            // so the PTY passes characters through exactly as received.
+            tio.c_iflag &= ~UInt(ICRNL | INLCR | IGNCR)
+            tio.c_oflag &= ~UInt(ONLCR | OCRNL)
             _ = tcsetattr(slave, TCSANOW, &tio)
         }
         
@@ -100,10 +102,16 @@ final class PTYWrapper: @unchecked Sendable {
         }
         cEnv.append(nil)
 
-        // Spawn
-        let spawnResult = posix_spawn(&pid, command, &fileActions, nil, cArgs, env != nil ? cEnv : nil)
+        // Spawn with SETSID to ensure controlling terminal is correctly established
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+        
+        let spawnResult = posix_spawn(&pid, command, &fileActions, &attr, cArgs, env != nil ? cEnv : nil)
+        posix_spawnattr_destroy(&attr)
+        
         if spawnResult != 0 {
-            fatalError("posix_spawn failed: \\(spawnResult)")
+            fatalError("posix_spawn failed: \(spawnResult)")
         }
         childPID = pid
         // Close descriptors not needed in parent
@@ -186,7 +194,7 @@ final class PTYWrapper: @unchecked Sendable {
             return
         }
         if let data = string.data(using: .utf8) {
-            let written = data.withUnsafeBytes { ptr in
+            _ = data.withUnsafeBytes { ptr in
                 Darwin.write(masterFD, ptr.baseAddress!, data.count)
             }
         } else {

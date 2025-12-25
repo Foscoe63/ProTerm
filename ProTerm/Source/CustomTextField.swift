@@ -75,6 +75,8 @@ struct CustomTextField: NSViewRepresentable {
     var onDownArrow: (() -> Bool)?
     var isFocused: Binding<Bool>
     var sessionID: UUID
+    var isPaginationActive: Bool = false
+    var onPaginationKey: ((String) -> Void)? = nil
     
     func makeNSView(context: Context) -> NSTextField {
         // Initialize swizzling for cursor styles (only once)
@@ -102,6 +104,13 @@ struct CustomTextField: NSViewRepresentable {
             cell.lineBreakMode = .byCharWrapping
             cell.focusRingType = .none
         }
+        // CRITICAL: Set up the custom cell SYNCHRONOUSLY before any focus attempts
+        // This ensures the custom field editor is available immediately
+        let customCell = CustomTextFieldCell(textCell: textField.stringValue)
+        customCell.cursorStyle = cursorStyle
+        customCell.cursorBlinking = cursorBlinking
+        textField.cell = customCell
+        
         textField.cursorStyle = cursorStyle
         textField.cursorBlinking = cursorBlinking
         textField.cursorColor = cursorColor
@@ -110,6 +119,8 @@ struct CustomTextField: NSViewRepresentable {
         textField.onTab = onTab
         textField.onUpArrow = onUpArrow
         textField.onDownArrow = onDownArrow
+        textField.isPaginationActive = isPaginationActive
+        textField.onPaginationKey = onPaginationKey
         // Initialize coordinator's last known value
         context.coordinator.lastUserInputValue = text
         
@@ -130,11 +141,11 @@ struct CustomTextField: NSViewRepresentable {
             isFocused.wrappedValue = false
         }
         
-        // Set initial focus if requested – defer until the field is attached to a window
-        if isFocused.wrappedValue {
-            textField.autoFocusOnAttach = true
-            textField.requestAutoFocus()
-        }
+        // Set autoFocusOnAttach for command input fields
+        // This ensures focus is set when the text field is first added to the window
+        // All CustomTextFields with sessionID are command input fields
+        textField.autoFocusOnAttach = true
+        textField.requestAutoFocus()
         
         return textField
     }
@@ -225,6 +236,8 @@ struct CustomTextField: NSViewRepresentable {
             customField.onTab = onTab
             customField.onUpArrow = onUpArrow
             customField.onDownArrow = onDownArrow
+            customField.isPaginationActive = isPaginationActive
+            customField.onPaginationKey = onPaginationKey
             
             // Force cursor redraw and update associated objects immediately
             // Especially important when preferences change
@@ -285,6 +298,11 @@ struct CustomTextField: NSViewRepresentable {
             if !isEditorFirstResponder {
                 customField.autoFocusOnAttach = true
                 customField.requestAutoFocus()
+                
+                // Also try to force focus immediately if window exists and is key
+                if let window = nsView.window, window.isKeyWindow {
+                    customField.forceBecomeFirstResponder(allowActivation: true)
+                }
             }
         }
     }
@@ -408,6 +426,89 @@ class CustomNSTextField: NSTextField {
         super.mouseDown(with: event)
     }
     
+    override func keyDown(with event: NSEvent) {
+        // If pagination is active, intercept Space, Enter, and Q keys
+        if isPaginationActive, let onPaginationKey = onPaginationKey {
+            let keyCode = event.keyCode
+            let characters = event.charactersIgnoringModifiers ?? ""
+            
+            
+            // Space key (keyCode 49) or 'q'/'Q' key or Enter key
+            if keyCode == 49 {
+                // Space key - send space to pagination handler
+                // Clear the input field first to prevent interference
+                self.stringValue = ""
+                if let editor = self.currentEditor() as? NSTextView {
+                    editor.string = ""
+                    editor.needsDisplay = true
+                }
+                self.needsDisplay = true
+                // Send space to pagination handler
+                onPaginationKey(" ")
+                return
+            } else if characters.lowercased() == "q" {
+                // Q key - send q to pagination handler
+                // Clear the input field first to prevent interference
+                self.stringValue = ""
+                if let editor = self.currentEditor() as? NSTextView {
+                    editor.string = ""
+                    editor.needsDisplay = true
+                }
+                self.needsDisplay = true
+                // Send q to pagination handler
+                onPaginationKey("q")
+                return
+            } else if keyCode == 36 || keyCode == 76 {
+                // Return/Enter key (keyCode 36 for regular, 76 for numpad)
+                // Clear the input field first to prevent interference
+                self.stringValue = ""
+                if let editor = self.currentEditor() as? NSTextView {
+                    editor.string = ""
+                    editor.needsDisplay = true
+                }
+                self.needsDisplay = true
+                // Send newline to pagination handler
+                onPaginationKey("\n")
+                return
+            } else {
+            }
+        }
+        
+        // For all other keys, use default behavior
+        super.keyDown(with: event)
+    }
+    
+    // Also handle keys when field editor is active
+    override func textDidChange(_ notification: Notification) {
+        super.textDidChange(notification)
+        
+        // If pagination is active, check for Space or Q in the input
+        // Only process pagination keys if pagination is explicitly active AND we have a handler
+        if isPaginationActive, let onPaginationKey = onPaginationKey {
+            let currentText = self.stringValue
+            // Only intercept if we have a single character (Space or Q)
+            // Don't clear multi-character input - user might be typing a command
+            if currentText.count == 1 {
+                if currentText == " " {
+                    // Space was typed - send it to pagination handler
+                    onPaginationKey(" ")
+                    self.stringValue = ""
+                    if let editor = self.currentEditor() as? NSTextView {
+                        editor.string = ""
+                    }
+                } else if currentText.lowercased() == "q" {
+                    // Q was typed - send it to pagination handler
+                    onPaginationKey("q")
+                    self.stringValue = ""
+                    if let editor = self.currentEditor() as? NSTextView {
+                        editor.string = ""
+                    }
+                }
+            }
+            // If text is longer than 1 character, don't interfere - user is typing a command
+        }
+    }
+    
     override var acceptsFirstResponder: Bool {
         return true
     }
@@ -415,15 +516,29 @@ class CustomNSTextField: NSTextField {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         hasAutoFocusedOnAttach = false
-        if autoFocusOnAttach {
+        
+        // Always schedule auto focus for command input fields (those with sessionID)
+        if autoFocusOnAttach || sessionID != nil {
             scheduleAutoFocus()
         }
+        
         let identifier = ObjectIdentifier(self)
         let currentSessionID = sessionID
         Task { @MainActor [weak self] in
-            if let self, self.window != nil {
+            if let self, let window = self.window {
                 self.registerIfPossible()
-                self.window?.initialFirstResponder = self
+                window.initialFirstResponder = self
+                
+                // For command input fields, ALWAYS try to focus when attached to window
+                // Use multiple delays to ensure focus succeeds
+                if self.sessionID != nil || self.autoFocusOnAttach {
+                    for delay in [0.05, 0.1, 0.2, 0.3, 0.5] {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                            guard let self = self, self.window != nil else { return }
+                            self.forceBecomeFirstResponder(allowActivation: true)
+                        }
+                    }
+                }
             } else if let sessionID = currentSessionID {
                 CommandInputFocusController.shared.unregister(sessionID: sessionID, identifier: identifier)
             }
@@ -492,17 +607,82 @@ class CustomNSTextField: NSTextField {
             }
         }
         
-        window.makeFirstResponder(self)
-        
-        if let editor = self.currentEditor() {
-            window.makeFirstResponder(editor)
-        }
-
         window.initialFirstResponder = self
+        
+        // Check if editor is already active - if so, just ensure cursor is visible
+        if let editor = self.currentEditor() as? NSTextView,
+           window.firstResponder === editor {
+            // Editor already active - just ensure cursor visibility
+            editor.updateInsertionPointStateAndRestartTimer(true)
+            editor.setNeedsDisplay(editor.bounds)
+            if let customEditor = editor as? CustomFieldEditor {
+                customEditor.cursorVisible = true
+                customEditor.setNeedsDisplay(customEditor.bounds)
+            }
+            return
+        }
+        
+        // First, ensure our custom cell is set up
+        if !(self.cell is CustomTextFieldCell) {
+            let customCell = CustomTextFieldCell(textCell: self.stringValue)
+            customCell.cursorStyle = cursorStyle
+            customCell.cursorBlinking = cursorBlinking
+            self.cell = customCell
+        }
+        
+        // Use selectText(nil) - this is the proper way to start editing
+        self.selectText(nil)
+        
+        // Check if editing started
+        if self.currentEditor() != nil {
+            self.setupEditorCursor()
+        } else {
+            // selectText didn't work - try calling the cell's edit method directly
+            if let customCell = self.cell as? CustomTextFieldCell,
+               let editor = customCell.fieldEditor(for: self) {
+                // Manually start editing using the cell
+                customCell.select(withFrame: self.bounds,
+                                  in: self,
+                                  editor: editor,
+                                  delegate: self,
+                                  start: 0,
+                                  length: 0)
+                self.setupEditorCursor()
+            }
+        }
+        
+        // Retry a few times to ensure it sticks
+        for delay in [0.1, 0.2, 0.4] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self else { return }
+                if self.currentEditor() == nil {
+                    // If editor still not active, try selectText again
+                    self.selectText(nil)
+                }
+                self.setupEditorCursor()
+            }
+        }
         
         if allowActivation, !window.isKeyWindow {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
+        }
+    }
+    
+    @MainActor
+    private func setupEditorCursor() {
+        // Only use currentEditor - this is the ACTIVE editor that's properly attached
+        if let editor = self.currentEditor() as? NSTextView {
+            // Position cursor at end
+            editor.selectedRange = NSRange(location: editor.string.count, length: 0)
+            // Force cursor to be visible and blinking
+            editor.updateInsertionPointStateAndRestartTimer(true)
+            editor.setNeedsDisplay(editor.bounds)
+            // Also set cursorVisible on CustomFieldEditor
+            if let customEditor = editor as? CustomFieldEditor {
+                customEditor.cursorVisible = true
+                customEditor.setNeedsDisplay(customEditor.bounds)
+            }
         }
     }
     var autoFocusOnAttach: Bool = false {
@@ -514,6 +694,7 @@ class CustomNSTextField: NSTextField {
         }
     }
     private var hasAutoFocusedOnAttach = false
+    
     var cursorStyle: TerminalVisualSettings.CursorStyle = .bar {
         didSet {
             MainActor.assumeIsolated {
@@ -575,6 +756,8 @@ class CustomNSTextField: NSTextField {
     var onTab: (() -> Bool)?
     var onUpArrow: (() -> Bool)?
     var onDownArrow: (() -> Bool)?
+    var isPaginationActive: Bool = false
+    var onPaginationKey: ((String) -> Void)? = nil
     
     nonisolated(unsafe) private var cursorTimer: Timer?
     private var cursorVisible: Bool = true
@@ -884,10 +1067,45 @@ class CustomFieldEditor: NSTextView {
     }
     var cursorBlinking: Bool = true
     var cursorVisible: Bool = true
+    var isPaginationActive: Bool = false
+    var onPaginationKey: ((String) -> Void)? = nil
     
     override var isFieldEditor: Bool {
         get { true }
         set { /* ignore */ }
+    }
+    
+    override func keyDown(with event: NSEvent) {
+        // If pagination is active, intercept Space, Enter, and Q keys
+        if isPaginationActive, let onPaginationKey = onPaginationKey {
+            let keyCode = event.keyCode
+            let characters = event.charactersIgnoringModifiers ?? ""
+            
+            
+            // Space key (keyCode 49) or 'q'/'Q' key or Enter key
+            if keyCode == 49 {
+                // Space key - send space to pagination handler
+                self.string = ""
+                onPaginationKey(" ")
+                // Record the time to maintain the cooldown in TerminalView
+                NotificationCenter.default.post(name: Notification.Name("ProTermPaginationKeySent"), object: nil)
+                return
+            } else if characters.lowercased() == "q" {
+                // Q key - send q to pagination handler
+                self.string = ""
+                onPaginationKey("q")
+                NotificationCenter.default.post(name: Notification.Name("ProTermPaginationKeySent"), object: nil)
+                return
+            } else if keyCode == 36 || keyCode == 76 {
+                // Return/Enter key (keyCode 36 for regular, 76 for numpad)
+                self.string = ""
+                onPaginationKey("\n")
+                NotificationCenter.default.post(name: Notification.Name("ProTermPaginationKeySent"), object: nil)
+                return
+            }
+        }
+        
+        super.keyDown(with: event)
     }
     
     override func draw(_ dirtyRect: NSRect) {
@@ -909,12 +1127,26 @@ class CustomFieldEditor: NSTextView {
         let selectedRange = selectedRange()
         guard selectedRange.length == 0 else { return nil }
         
-        let characterRange = NSRange(location: selectedRange.location, length: 1)
-        let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
-        let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        // Handle empty text - return a rect at the start of the text container
+        if string.isEmpty {
+            let lineHeight = font?.pointSize ?? 14.0
+            let origin = textContainerOrigin
+            return NSRect(x: origin.x, y: origin.y, width: 2, height: lineHeight * 1.2)
+        }
         
-        // Adjust for the insertion point (typically at the left edge of the character)
-        return NSRect(x: rect.origin.x, y: rect.origin.y, width: 2, height: rect.height)
+        // For non-empty text, get the rect from layout manager
+        let location = min(selectedRange.location, string.count)
+        if location >= string.count {
+            // Cursor at end - get rect after last character
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: max(0, string.count - 1), length: 1), actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            return NSRect(x: rect.maxX, y: rect.origin.y, width: 2, height: rect.height)
+        } else {
+            let characterRange = NSRange(location: location, length: 1)
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            return NSRect(x: rect.origin.x, y: rect.origin.y, width: 2, height: rect.height)
+        }
     }
     
     private func expandedRect(from rect: NSRect) -> NSRect {
@@ -974,6 +1206,8 @@ extension CustomFieldEditor {
     func apply(from field: CustomNSTextField) {
         cursorStyle = field.cursorStyle
         cursorBlinking = field.cursorBlinking
+        isPaginationActive = field.isPaginationActive
+        onPaginationKey = field.onPaginationKey
         font = field.font
         textColor = field.textColor
         insertionPointColor = field.cursorColor
@@ -1072,12 +1306,26 @@ extension NSTextView {
         let selectedRange = selectedRange()
         guard selectedRange.length == 0 else { return nil }
         
-        let characterRange = NSRange(location: selectedRange.location, length: 1)
-        let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
-        let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        // Handle empty text - return a rect at the start of the text container
+        if string.isEmpty {
+            let lineHeight = font?.pointSize ?? 14.0
+            let origin = textContainerOrigin
+            return NSRect(x: origin.x, y: origin.y, width: 2, height: lineHeight * 1.2)
+        }
         
-        // Adjust for the insertion point (typically at the left edge of the character)
-        return NSRect(x: rect.origin.x, y: rect.origin.y, width: 2, height: rect.height)
+        // For non-empty text, get the rect from layout manager
+        let location = min(selectedRange.location, string.count)
+        if location >= string.count {
+            // Cursor at end - get rect after last character
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: max(0, string.count - 1), length: 1), actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            return NSRect(x: rect.maxX, y: rect.origin.y, width: 2, height: rect.height)
+        } else {
+            let characterRange = NSRange(location: location, length: 1)
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange, actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            return NSRect(x: rect.origin.x, y: rect.origin.y, width: 2, height: rect.height)
+        }
     }
     
     private func expandedRectUsingFont(from rect: NSRect) -> NSRect {

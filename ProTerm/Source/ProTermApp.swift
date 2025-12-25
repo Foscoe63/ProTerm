@@ -5,7 +5,6 @@ struct ProTermApp: App {
     @StateObject private var terminalManager: TerminalManager
     @StateObject private var themeManager: ThemeManager
     @StateObject private var shellManager: ShellManager
-    @StateObject private var lineNumbersManager: LineNumbersManager
     @StateObject private var keyboardShortcutsManager: KeyboardShortcutsManager
     @StateObject private var fontManager: FontManager
     @StateObject private var advancedTextSelection: AdvancedTextSelection
@@ -25,7 +24,6 @@ struct ProTermApp: App {
         _terminalManager = StateObject(wrappedValue: terminalManager)
         _themeManager = StateObject(wrappedValue: themeManager)
         _shellManager = StateObject(wrappedValue: ShellManager())
-        _lineNumbersManager = StateObject(wrappedValue: LineNumbersManager())
         _keyboardShortcutsManager = StateObject(wrappedValue: KeyboardShortcutsManager())
         _fontManager = StateObject(wrappedValue: fontManager)
         _advancedTextSelection = StateObject(wrappedValue: AdvancedTextSelection())
@@ -45,7 +43,6 @@ struct ProTermApp: App {
                 .environmentObject(terminalManager)
                 .environmentObject(themeManager)
                 .environmentObject(shellManager)
-                .environmentObject(lineNumbersManager)
                 .environmentObject(keyboardShortcutsManager)
                 .environmentObject(fontManager)
                 .environmentObject(advancedTextSelection)
@@ -131,24 +128,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    private var focusAttemptCount = 0
+    
     private func startFocusPolling() {
-        // Poll for the text field and set focus multiple times with increasing delays
-        let delays: [UInt64] = [
-            50_000_000,    // 0.05s
-            100_000_000,   // 0.1s
-            200_000_000,   // 0.2s
-            300_000_000,   // 0.3s
-            500_000_000,   // 0.5s
-            700_000_000,   // 0.7s
-            1_000_000_000, // 1.0s
-            1_500_000_000, // 1.5s
-            2_000_000_000  // 2.0s (final attempt)
-        ]
+        focusAttemptCount = 0
         
-        for delay in delays {
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: delay)
+        // Use Task-based polling instead of Timer to avoid sendable issues
+        Task { @MainActor in
+            for _ in 1...50 {
+                // Check if focus succeeded (text field is first responder or its editor is)
+                if let window = NSApp.windows.first(where: { $0.isVisible }),
+                   let firstResponder = window.firstResponder {
+                    // If first responder is a text view (field editor) or text field, focus succeeded
+                    if firstResponder is NSTextView || firstResponder is NSTextField {
+                        return
+                    }
+                }
+                
                 self.attemptFocus()
+                
+                // Wait 0.1 seconds before next attempt
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
     }
@@ -166,32 +166,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !window.isKeyWindow {
             window.makeKeyAndOrderFront(nil)
             window.makeKey()
-            // Wait a moment for window to become key
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 50_000_000) // 0.05s
-                self.attemptFocus() // Retry after window becomes key
-            }
-            return
+            return // Will be retried by the polling loop
         }
         
         // Find and focus the text field
         if let textField = findTextField(in: window.contentView) {
             window.initialFirstResponder = textField
-            let success = window.makeFirstResponder(textField)
             
-            if success {
-                // Also try to focus the field editor
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 30_000_000)
-                    if let editor = textField.currentEditor() {
-                        window.makeFirstResponder(editor)
+            // Use selectText(nil) - the ONLY proper way to start editing
+            // It makes the field first responder AND properly attaches the field editor
+            textField.selectText(nil)
+            
+            // Defer cursor setup to next run loop
+            DispatchQueue.main.async {
+                if let editor = textField.currentEditor() as? NSTextView {
+                    // Position cursor at end
+                    editor.selectedRange = NSRange(location: editor.string.count, length: 0)
+                    // Force cursor to be visible
+                    editor.updateInsertionPointStateAndRestartTimer(true)
+                    editor.needsDisplay = true
+                    // Also set cursorVisible on CustomFieldEditor
+                    if let customEditor = editor as? CustomFieldEditor {
+                        customEditor.cursorVisible = true
+                        customEditor.needsDisplay = true
                     }
-                }
-            } else {
-                // Failed to set focus - window might not be key yet, retry
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                    self.attemptFocus()
                 }
             }
         } else {

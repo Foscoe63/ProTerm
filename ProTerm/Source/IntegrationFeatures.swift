@@ -138,11 +138,11 @@ class IntegrationFeatures: NSObject, ObservableObject {
     
     struct SSHConnection: Identifiable, Codable {
         let id: UUID
-        let name: String
-        let host: String
-        let port: Int
-        let username: String
-        let keyPath: String?
+        var name: String
+        var host: String
+        var port: Int
+        var username: String
+        var keyPath: String?
         var usesPassword: Bool // Indicates if password authentication is used
         var lastConnected: Date?
         
@@ -364,6 +364,31 @@ class IntegrationFeatures: NSObject, ObservableObject {
         }
         
         saveSSHConnections()
+    }
+    
+    func updateSSHConnection(id: UUID, name: String, host: String, port: Int, username: String, keyPath: String?, usesPassword: Bool, password: String?) {
+        if let index = sshConnections.firstIndex(where: { $0.id == id }) {
+            sshConnections[index].name = name
+            sshConnections[index].host = host
+            sshConnections[index].port = port
+            sshConnections[index].username = username
+            sshConnections[index].keyPath = keyPath
+            sshConnections[index].usesPassword = usesPassword
+            
+            // Handle password update
+            if usesPassword {
+                if let password = password, !password.isEmpty {
+                    // Update password if a new one is provided
+                    _ = KeychainHelper.shared.savePassword(password, for: id)
+                }
+                // If password is empty/nil, we keep the existing one in Keychain
+            } else {
+                // If switched to SSH Key, remove existing password
+                _ = KeychainHelper.shared.deletePassword(for: id)
+            }
+            
+            saveSSHConnections()
+        }
     }
     
     func removeSSHConnection(_ connection: SSHConnection) {

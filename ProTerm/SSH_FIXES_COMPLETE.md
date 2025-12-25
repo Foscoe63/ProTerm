@@ -2,107 +2,51 @@
 
 ## Issues Fixed
 
-### 1. **Crash on Prebuilt SSH Sessions** ✅ FIXED
-**Problem**: Using `DispatchQueue.main.sync` while already on the main thread caused a deadlock, crashing the app when trying to use saved SSH connections.
+### 1. **Legacy SSH Support for Older Devices** (latest fix)
+**Problem**: Connecting to older devices (like Cisco ASA5506) which use older SSH algorithms and HMACs (Diffie-Hellman Group 1, AES-CBC, SSH-DSS, HMAC-SHA1) failed because modern OpenSSH disables these by default.
 
-**Solution**: Changed to use `Task { @MainActor in }` with a semaphore to properly handle MainActor isolation while maintaining synchronous behavior.
+**Solution**: Added legacy algorithms AND HMACs to the SSH command arguments in both direct connections (`ssh user@host`) and saved connections (`SSHArgsBuilder`).
+- `KexAlgorithms`: +diffie-hellman-group1-sha1, diffie-hellman-group14-sha1
+- `HostKeyAlgorithms`: +ssh-rsa, ssh-dss
+- `PubkeyAcceptedKeyTypes`: +ssh-rsa, ssh-dss
+- `Ciphers`: +aes128-cbc, 3des-cbc, aes256-cbc, etc.
+- `MACs`: +hmac-sha1, hmac-sha1-96, hmac-md5
+- `HostKeyAlgorithms`: +ssh-rsa (Note: `ssh-dss` caused syntax errors on modern OpenSSH, so only `ssh-rsa` is enabled)
 
-**File**: `SSHSessionManager.swift` (lines 104-147)
+**Debugging Enabled**: Added `-vv` flag to all SSH connections, which revealed `no matching host key type found`. Enabled explicit `ssh-rsa` support to fix this.
 
-### 2. **SSH Password Prompts Not Showing** ✅ FIXED
-**Problem**: The password prompt detection only looked for sudo prompts, not SSH prompts. When you typed `ssh user@host`, SSH was prompting for a password but the UI wasn't showing the password input field.
+**Files**: `TerminalSession.swift`, `SSHArgsBuilder.swift`
 
-**Solution**: Extended `checkForPasswordPrompt()` to detect SSH password prompts in addition to sudo prompts. SSH prompts look like:
-- `user@host's password:`
-- `Password:`
-- `password:`
 
-**File**: `TerminalView.swift` (lines 1238-1302)
+### 2. **Crash on Prebuilt SSH Sessions** ✅ FIXED
+**Problem**: Using `DispatchQueue.main.sync` while already on the main thread caused a deadlock.
+**Solution**: Changed to use `Task { @MainActor in }` with a semaphore.
+**File**: `SSHSessionManager.swift`
 
-### 3. **Terminal Configuration** ✅ FIXED (from previous session)
-**Problem**: PTYWrapper was using canonical mode instead of raw mode for SSH.
+### 3. **SSH Password Prompts Not Showing** ✅ FIXED
+**Problem**: UI wasn't detecting standard SSH password prompts.
+**Solution**: Extended `checkForPasswordPrompt()` to detect `user@host's password:`, `Password:`, etc.
+**File**: `TerminalView.swift`
 
+### 4. **Terminal Configuration** ✅ FIXED
 **Solution**: Changed to use `cfmakeraw()` for proper SSH terminal handling.
-
 **File**: `PTyWrapper.swift`
-
-## What Should Work Now
-
-### ✅ Prebuilt Sessions (Saved SSH Connections)
-1. Open ProTerm
-2. Click the network icon in the toolbar
-3. Select your saved SSH connection
-4. **Expected**: 
-   - A new tab opens
-   - You see a password prompt UI
-   - You can type your password
-   - After entering password, you connect to the server
-
-### ✅ Direct SSH Commands
-1. Open ProTerm
-2. Type: `ssh ewg@192.168.1.176`
-3. Press Enter
-4. **Expected**:
-   - You see the SSH output
-   - A password input field appears
-   - You can type your password
-   - After entering password, you connect to the server
 
 ## Testing Instructions
 
-### Test 1: Prebuilt Session
-```
-1. Rebuild and run ProTerm
-2. Click network icon → select saved connection
-3. Wait for password prompt UI to appear
-4. Type password and press Enter
-5. Verify you're connected and can run commands
-```
-
-### Test 2: Direct SSH Command
-```
-1. Type: ssh ewg@192.168.1.176
-2. Press Enter
-3. Wait for password prompt UI to appear
-4. Type password and press Enter
-5. Verify you're connected and can run commands
-```
-
-### Test 3: SSH with Keys
-```
-1. Type: ssh -i ~/.ssh/id_rsa ewg@192.168.1.176
-2. Press Enter
-3. Should connect without password prompt (if key is set up)
-```
-
-## Known Limitations
-
-1. **Password Authentication Only for Direct Commands**: The direct `ssh` command disables public key authentication by default. If you want to use SSH keys, either:
-   - Use the `-i` flag: `ssh -i ~/.ssh/id_rsa user@host`
-   - Use a saved connection with key path configured
-
-2. **Connection Timeout**: If the server doesn't respond within 30 seconds, the connection will fail.
+### Test 1: Connect to Legacy Device
+1. Open ProTerm.
+2. Type: `ssh user@legacy-device-ip` (or use a saved connection).
+3. **Verify**:
+   - Connection should succeed (or at least proceed further).
+   - Check Console/Debug output for lines starting with `debug1:`.
+   - Any "no matching ..." errors will now be visible in the logs.
 
 ## Debugging
 
-If SSH still doesn't work, check the console logs for:
-- `[ProTerm][SSH]` - SSH session setup messages
-- `[ProTerm][PTY]` - PTY read/write operations
-- Look for "password:" in the output to see if the prompt is being detected
-- Check `showPasswordInput` state changes
+If connection still fails, look at the verbose log output:
+- `debug1: kex: algorithm: ...`
+- `debug1: host key algo: ...`
+- `debug1: ciphers ctos: ...`
 
-## Files Modified
-
-1. **SSHSessionManager.swift** - Fixed deadlock in PTY attachment
-2. **TerminalView.swift** - Added SSH password prompt detection
-3. **PTyWrapper.swift** - Changed to raw mode (from previous session)
-4. **ButtonBarView.swift** - Session ordering (from previous session)
-
-## Next Steps
-
-After testing, if you still have issues:
-1. Check that the SSH server is reachable: `ping 192.168.1.176`
-2. Try connecting with system Terminal: `ssh ewg@192.168.1.176`
-3. Check SSH server logs for authentication failures
-4. Verify your SSH credentials are correct
-5. Check console logs for any error messages
+If you see `Unable to negotiate...`, the missing algorithm will be listed there. Add it to `TerminalSession.swift` (direct) or `SSHArgsBuilder.swift` (saved).
