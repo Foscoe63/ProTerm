@@ -49,7 +49,7 @@ struct FocusRestorationModifier: ViewModifier {
   
   func body(content: Content) -> some View {
     content
-      .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermFocusCommandInput"))) { notification in
+      .onReceive(NotificationCenter.default.publisher(for: .focusCommandInput)) { notification in
         if let notifiedSessionId = notification.object as? UUID, notifiedSessionId == session.id {
           let recentlyTyped = lastTypingTime != nil && Date().timeIntervalSince(lastTypingTime!) < 2.0
           

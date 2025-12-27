@@ -124,7 +124,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 window.makeKey()
             }
             // Post focus notification
-            NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: nil)
+            NotificationCenter.default.post(name: .focusCommandInput, object: nil)
         }
     }
     
@@ -194,7 +194,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             // Text field not found yet - post notification as fallback
-            NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: nil)
+            NotificationCenter.default.post(name: .focusCommandInput, object: nil)
         }
     }
     
@@ -220,8 +220,3 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-// MARK: – Notification used by the gear‑button sheet
-
-extension Notification.Name {
-    static let closePreferences = Notification.Name("ProTermClosePreferences")
-}

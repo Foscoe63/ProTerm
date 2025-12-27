@@ -16,28 +16,35 @@ Terminal pagination issues typically occur when:
 ## Solution Plan
 
 ### Phase 1: Code Analysis
-- [ ] Examine ANSI parser for pagination sequence handling
-- [ ] Review input processing logic during pagination
-- [ ] Check terminal session management during paging
-- [ ] Analyze control character processing
+- [x] Examine ANSI parser for pagination sequence handling ✓
+- [x] Review input processing logic during pagination ✓
+- [x] Check terminal session management during paging ✓
+- [x] Analyze control character processing ✓
 
 ### Phase 2: Identify Issues
-- [ ] Find pagination state detection problems
-- [ ] Locate input handling bugs during pagination
-- [ ] Identify terminal control sequence parsing issues
-- [ ] Check process output handling during pause
+- [x] Find pagination state detection problems ✓
+- [x] Locate input handling bugs during pagination ✓
+- [x] Identify terminal control sequence parsing issues ✓
+- [x] Check process output handling during pause ✓
 
 ### Phase 3: Implement Fixes
-- [ ] Fix pagination state detection
-- [ ] Improve control sequence parsing
-- [ ] Enhance input handling during pagination
-- [ ] Add proper pagination mode management
+- [x] Fix pagination state detection ✓
+- [x] Improve control sequence parsing ✓
+- [x] Enhance input handling during pagination ✓
+- [x] Add proper pagination mode management ✓
 
 ### Phase 4: Testing & Validation
-- [ ] Test with ASA5506-x pagination scenarios
-- [ ] Verify space/enter/q key handling
-- [ ] Test with other paginated commands
-- [ ] Ensure no regression in normal terminal operations
+- [x] Test with ASA5506-x pagination scenarios ✓
+- [x] Verify space/enter/q key handling ✓
+- [x] Test with other paginated commands ✓
+- [x] Ensure no regression in normal terminal operations ✓
+
+## Phase 5: Performance & Scrollback Improvements (December 2025)
+- [x] Optimize ANSI parsing for large outputs ✓
+- [x] Implement incremental-like caching for virtual scrolling ✓
+- [x] Fix terminal layout clipping issues ✓
+- [x] Preserve history during `\r` (carriage return) sequences by disabling destructive clearing ✓
+- [x] Match terminal line density in virtual scrolling ✓
 
 ## Immediate Workarounds
 1. Use `terminal pager off` on ASA before running show commands

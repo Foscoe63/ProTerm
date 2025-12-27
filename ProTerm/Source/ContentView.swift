@@ -44,7 +44,7 @@ struct ContentView: View {
                                 // Post focus notification immediately
                                 if terminalManager.sessions.indices.contains(selectedTab) {
                                     let targetId = terminalManager.sessions[selectedTab].id
-                                    NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: targetId)
+                                    NotificationCenter.default.post(name: .focusCommandInput, object: targetId)
                                     Task { @MainActor in
                                         focusCurrentSession(reason: .startup)
                                     }
@@ -58,7 +58,7 @@ struct ContentView: View {
                                 window.makeKeyAndOrderFront(nil)
                                 if terminalManager.sessions.indices.contains(selectedTab) {
                                     let targetId = terminalManager.sessions[selectedTab].id
-                                    NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: targetId)
+                                    NotificationCenter.default.post(name: .focusCommandInput, object: targetId)
                                     Task { @MainActor in
                                         focusCurrentSession(reason: .startup)
                                     }
@@ -73,7 +73,7 @@ struct ContentView: View {
                             if terminalManager.sessions.indices.contains(selectedTab) {
                                 let targetId = terminalManager.sessions[selectedTab].id
                                 // Post focus notification for the current session
-                                NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: targetId)
+                                NotificationCenter.default.post(name: .focusCommandInput, object: targetId)
                                 Task { @MainActor in
                                     focusCurrentSession(reason: .windowBecameKey)
                                 }
@@ -706,12 +706,6 @@ struct CommandPaletteRow: View {
     }
 }
 
-// MARK: - Additional Notification Names
-extension Notification.Name {
-    static let selectAllTerminal = Notification.Name("ProTermSelectAllTerminal")
-    static let focusCommandInput = Notification.Name("ProTermFocusCommandInput")
-    static let showCommandPalette = Notification.Name("ProTermShowCommandPalette")
-}
 
 // MARK: - Reactive Tab Item (observes metadata changes)
 struct ReactiveTabItem: View {

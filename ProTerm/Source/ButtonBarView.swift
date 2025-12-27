@@ -558,18 +558,3 @@ struct ButtonGroup<Content: View>: View {
     }
 }
 
-// MARK: - Notification Names
-extension Notification.Name {
-    static let pasteToInput = Notification.Name("ProTermPasteToInput")
-    static let searchInTerminal = Notification.Name("ProTermSearchInTerminal")
-    static let findInTerminal = Notification.Name("ProTermFindInTerminal")
-    static let replaceInTerminal = Notification.Name("ProTermReplaceInTerminal")
-    static let showHistory = Notification.Name("ProTermShowHistory")
-    static let copyLastCommand = Notification.Name("ProTermCopyLastCommand")
-    static let findInHistory = Notification.Name("ProTermFindInHistory")
-    static let resumeProcess = Notification.Name("ProTermResumeProcess")
-    static let showSystemInfo = Notification.Name("ProTermShowSystemInfo")
-    static let quickSearch = Notification.Name("ProTermQuickSearch")
-    static let copySelectedText = Notification.Name("ProTermCopySelectedText")
-    static let setSearchRegexMode = Notification.Name("ProTermSetSearchRegexMode")
-}

@@ -432,6 +432,10 @@ class CustomNSTextField: NSTextField {
             let keyCode = event.keyCode
             let characters = event.charactersIgnoringModifiers ?? ""
             
+            // Debug logging to help troubleshoot pagination issues
+            #if DEBUG
+            print("[Pagination] KeyDown: keyCode=\(keyCode), char=\(characters)")
+            #endif
             
             // Space key (keyCode 49) or 'q'/'Q' key or Enter key
             if keyCode == 49 {
@@ -443,8 +447,10 @@ class CustomNSTextField: NSTextField {
                     editor.needsDisplay = true
                 }
                 self.needsDisplay = true
+                
                 // Send space to pagination handler
                 onPaginationKey(" ")
+                NotificationCenter.default.post(name: Notification.Name("ProTermPaginationKeySent"), object: nil)
                 return
             } else if characters.lowercased() == "q" {
                 // Q key - send q to pagination handler
@@ -455,8 +461,10 @@ class CustomNSTextField: NSTextField {
                     editor.needsDisplay = true
                 }
                 self.needsDisplay = true
+                
                 // Send q to pagination handler
                 onPaginationKey("q")
+                NotificationCenter.default.post(name: Notification.Name("ProTermPaginationKeySent"), object: nil)
                 return
             } else if keyCode == 36 || keyCode == 76 {
                 // Return/Enter key (keyCode 36 for regular, 76 for numpad)
@@ -467,10 +475,11 @@ class CustomNSTextField: NSTextField {
                     editor.needsDisplay = true
                 }
                 self.needsDisplay = true
+                
                 // Send newline to pagination handler
                 onPaginationKey("\n")
+                NotificationCenter.default.post(name: Notification.Name("ProTermPaginationKeySent"), object: nil)
                 return
-            } else {
             }
         }
         
@@ -756,8 +765,28 @@ class CustomNSTextField: NSTextField {
     var onTab: (() -> Bool)?
     var onUpArrow: (() -> Bool)?
     var onDownArrow: (() -> Bool)?
-    var isPaginationActive: Bool = false
-    var onPaginationKey: ((String) -> Void)? = nil
+    var isPaginationActive: Bool = false {
+        didSet {
+            if let editor = currentEditor() as? CustomFieldEditor {
+                editor.isPaginationActive = isPaginationActive
+            }
+            if let window = self.window,
+               let editor = window.fieldEditor(false, for: self) as? CustomFieldEditor {
+                editor.isPaginationActive = isPaginationActive
+            }
+        }
+    }
+    var onPaginationKey: ((String) -> Void)? = nil {
+        didSet {
+            if let editor = currentEditor() as? CustomFieldEditor {
+                editor.onPaginationKey = onPaginationKey
+            }
+            if let window = self.window,
+               let editor = window.fieldEditor(false, for: self) as? CustomFieldEditor {
+                editor.onPaginationKey = onPaginationKey
+            }
+        }
+    }
     
     nonisolated(unsafe) private var cursorTimer: Timer?
     private var cursorVisible: Bool = true
@@ -1081,11 +1110,16 @@ class CustomFieldEditor: NSTextView {
             let keyCode = event.keyCode
             let characters = event.charactersIgnoringModifiers ?? ""
             
+            // Debug logging to help troubleshoot pagination issues
+            #if DEBUG
+            print("[Pagination-Editor] KeyDown: keyCode=\(keyCode), char=\(characters)")
+            #endif
             
             // Space key (keyCode 49) or 'q'/'Q' key or Enter key
             if keyCode == 49 {
                 // Space key - send space to pagination handler
                 self.string = ""
+                self.needsDisplay = true
                 onPaginationKey(" ")
                 // Record the time to maintain the cooldown in TerminalView
                 NotificationCenter.default.post(name: Notification.Name("ProTermPaginationKeySent"), object: nil)
@@ -1093,12 +1127,14 @@ class CustomFieldEditor: NSTextView {
             } else if characters.lowercased() == "q" {
                 // Q key - send q to pagination handler
                 self.string = ""
+                self.needsDisplay = true
                 onPaginationKey("q")
                 NotificationCenter.default.post(name: Notification.Name("ProTermPaginationKeySent"), object: nil)
                 return
             } else if keyCode == 36 || keyCode == 76 {
                 // Return/Enter key (keyCode 36 for regular, 76 for numpad)
                 self.string = ""
+                self.needsDisplay = true
                 onPaginationKey("\n")
                 NotificationCenter.default.post(name: Notification.Name("ProTermPaginationKeySent"), object: nil)
                 return

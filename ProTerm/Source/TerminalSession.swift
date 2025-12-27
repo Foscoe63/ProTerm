@@ -21,9 +21,16 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   // Limit output size to prevent performance issues
   // Read from UserDefaults to respect user's scrollback settings
   private var maxOutputLength: Int {
+    // For SSH sessions, use a much larger limit to preserve scrollback during pagination
+    // SSH pagination (like "show run" on Cisco devices) requires users to be able to
+    // scroll back through multiple pages of output
+    if isSSHSession {
+      return 10000000 // 10MB for SSH sessions to handle large configuration outputs
+    }
+
     let limit = UserDefaults.standard.integer(forKey: "ProTermScrollbackLimit")
     let enabled = UserDefaults.standard.object(forKey: "ProTermScrollbackEnabled") as? Bool ?? true
-    
+
     if enabled {
         // Enforce a sensible minimum to prevent "single page" bugs if UserDefault is weird
         if limit < 10000 { return 1000000 } // Default 1MB if unconfigured or too small
@@ -454,7 +461,9 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       object: nil,
       queue: .main
     ) { [weak self] _ in
-      self?.refreshIOFeatureFlags()
+      MainActor.assumeIsolated {
+        self?.refreshIOFeatureFlags()
+      }
     }
 
     // Observe terminal columns preference changes
@@ -463,13 +472,15 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       object: nil,
       queue: .main
     ) { [weak self] _ in
-      guard let self = self else { return }
-      let defaults = UserDefaults.standard
-      let configuredColumns = defaults.object(forKey: "ProTermTerminalColumns") as? Int ?? 80
-      self.columns = max(40, min(200, configuredColumns))
-      // Update COLUMNS environment variable for future commands
-      // Apply window size changes to active PTY if needed
-      self.applyTTYSettingsIfNeeded()
+      MainActor.assumeIsolated {
+        guard let self = self else { return }
+        let defaults = UserDefaults.standard
+        let configuredColumns = defaults.object(forKey: "ProTermTerminalColumns") as? Int ?? 80
+        self.columns = max(40, min(200, configuredColumns))
+        // Update COLUMNS environment variable for future commands
+        // Apply window size changes to active PTY if needed
+        self.applyTTYSettingsIfNeeded()
+      }
     }
 
     // Observe external PTY output (e.g., SSH sessions launched by
@@ -481,18 +492,21 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       object: nil,
       queue: .main
     ) { [weak self] note in
-      guard let self = self else { return }
-      // Filter by session ID manually to ensure we only process our own notifications
-      guard let noteSessionId = note.object as? UUID, noteSessionId == self.id else {
-        return
-      }
-      guard let text = note.userInfo?["text"] as? String else {
-        return
-      }
+      let noteSessionId = note.object as? UUID
+      let text = note.userInfo?["text"] as? String
       
-      // Append chunk exactly as received - do NOT add local newlines between chunks
-      // as it breaks character-at-a-time echoing in interactive sessions.
-      Task { @MainActor in
+      MainActor.assumeIsolated {
+        guard let self = self else { return }
+        // Filter by session ID manually to ensure we only process our own notifications
+        guard let noteSessionId = noteSessionId, noteSessionId == self.id else {
+          return
+        }
+        guard let text = text else {
+          return
+        }
+        
+        // Append chunk exactly as received - do NOT add local newlines between chunks
+        // as it breaks character-at-a-time echoing in interactive sessions.
         self.appendOutputChunk(text)
       }
     }
@@ -502,41 +516,43 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       object: self.id,
       queue: .main
     ) { [weak self] _ in
-      guard let strongSelf = self else { return }
-      strongSelf.isShuttingDown = true
-      strongSelf.shutdownFlag.set(true)
-      strongSelf.tearDownIOFeatures()
-      if let handler = strongSelf.ptyHandler {
-        handler.stop()
-        strongSelf.ptyHandler = nil
-      }
-      strongSelf.isProcessRunning = false
-
-      // If this is an SSH session, reset the flag and notify IntegrationFeatures to disconnect
-      if strongSelf.isSSHSession {
-        strongSelf.isSSHSession = false  // Reset so prompt will show after SSH exits
-        NotificationCenter.default.post(
-          name: Notification.Name("ProTermSSHSessionClosed"),
-          object: strongSelf.id
-        )
-      }
-
-      let closeMaster = strongSelf.masterFD
-      strongSelf.masterFD = -1
-      if closeMaster >= 0 {
-        DispatchQueue.global(qos: .userInitiated).async {
-          close(closeMaster)
+      MainActor.assumeIsolated {
+        guard let strongSelf = self else { return }
+        strongSelf.isShuttingDown = true
+        strongSelf.shutdownFlag.set(true)
+        strongSelf.tearDownIOFeatures()
+        if let handler = strongSelf.ptyHandler {
+          handler.stop()
+          strongSelf.ptyHandler = nil
         }
-      }
-      strongSelf.slaveFD = -1
-      strongSelf.childPID = 0
-      strongSelf.ensureSingleTrailingNewline()
-      strongSelf.isShuttingDown = false
-      strongSelf.shutdownFlag.set(false)
+        strongSelf.isProcessRunning = false
 
-      // After an interactive session ends, proactively refocus the command input
-      NotificationCenter.default.post(
-        name: Notification.Name("ProTermFocusCommandInput"), object: strongSelf.id)
+        // If this is an SSH session, reset the flag and notify IntegrationFeatures to disconnect
+        if strongSelf.isSSHSession {
+          strongSelf.isSSHSession = false  // Reset so prompt will show after SSH exits
+          NotificationCenter.default.post(
+            name: .sshSessionClosed,
+            object: strongSelf.id
+          )
+        }
+
+        let closeMaster = strongSelf.masterFD
+        strongSelf.masterFD = -1
+        if closeMaster >= 0 {
+          DispatchQueue.global(qos: .userInitiated).async {
+            close(closeMaster)
+          }
+        }
+        strongSelf.slaveFD = -1
+        strongSelf.childPID = 0
+        strongSelf.ensureSingleTrailingNewline()
+        strongSelf.isShuttingDown = false
+        strongSelf.shutdownFlag.set(false)
+
+        // After an interactive session ends, proactively refocus the command input
+        NotificationCenter.default.post(
+          name: .focusCommandInput, object: strongSelf.id)
+      }
     }
   }
 
@@ -1005,7 +1021,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
         // After an interactive session ends, proactively refocus the command input
         NotificationCenter.default.post(
-          name: Notification.Name("ProTermFocusCommandInput"), object: self.id)
+          name: .focusCommandInput, object: self.id)
       }
     }
     source.setCancelHandler {
@@ -1252,11 +1268,3 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   }
 }
 
-// MARK: - Notification extensions
-extension Notification.Name {
-  static let directoryChanged = Notification.Name("ProTermDirectoryChanged")
-  static let terminalTitleDidChange = Notification.Name("ProTermTerminalTitleDidChange")
-  static let sshPTYOutput = Notification.Name("ProTermSSHPTYOutput")
-  static let sshPTYExit = Notification.Name("ProTermSSHPTYExit")
-  static let proTermTerminalColumnsDidChange = Notification.Name("ProTermTerminalColumnsDidChange")
-}

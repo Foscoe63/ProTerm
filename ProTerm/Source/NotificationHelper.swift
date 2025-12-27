@@ -126,3 +126,40 @@ struct ToastContainer: View {
         .allowsHitTesting(false)
     }
 }
+
+// MARK: - Global Notification Names
+extension Notification.Name {
+    // Session & Terminal
+    static let directoryChanged = Notification.Name("ProTermDirectoryChanged")
+    static let terminalTitleDidChange = Notification.Name("ProTermTerminalTitleDidChange")
+    static let sshPTYOutput = Notification.Name("ProTermSSHPTYOutput")
+    static let sshPTYExit = Notification.Name("ProTermSSHPTYExit")
+    static let proTermTerminalColumnsDidChange = Notification.Name("ProTermTerminalColumnsDidChange")
+    static let focusCommandInput = Notification.Name("ProTermFocusCommandInput")
+    static let terminalBell = Notification.Name("ProTermTerminalBell")
+    static let selectAllTerminal = Notification.Name("ProTermSelectAllTerminal")
+    static let showCommandPalette = Notification.Name("ProTermShowCommandPalette")
+    static let resumeProcess = Notification.Name("ProTermResumeProcess")
+    static let paginationKeySent = Notification.Name("ProTermPaginationKeySent")
+    static let sshSessionClosed = Notification.Name("ProTermSSHSessionClosed")
+    
+    // Preferences & UI
+    static let proTermIOSettingsDidChange = Notification.Name("ProTermIOSettingsDidChange")
+    static let closePreferences = Notification.Name("ProTermClosePreferences")
+    static let showPreferences = Notification.Name("ProTermShowPreferences")
+    
+    // Search & Edit
+    static let searchInTerminal = Notification.Name("ProTermSearchInTerminal")
+    static let findInTerminal = Notification.Name("ProTermFindInTerminal")
+    static let setSearchRegexMode = Notification.Name("ProTermSetSearchRegexMode")
+    static let replaceInTerminal = Notification.Name("ProTermReplaceInTerminal")
+    static let quickSearch = Notification.Name("ProTermQuickSearch")
+    
+    // Commands & History
+    static let copySelectedText = Notification.Name("ProTermCopySelectedText")
+    static let pasteToInput = Notification.Name("ProTermPasteToInput")
+    static let copyLastCommand = Notification.Name("ProTermCopyLastCommand")
+    static let showHistory = Notification.Name("ProTermShowHistory")
+    static let findInHistory = Notification.Name("ProTermFindInHistory")
+    static let showSystemInfo = Notification.Name("ProTermShowSystemInfo")
+}

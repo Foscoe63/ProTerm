@@ -119,59 +119,50 @@ struct ANSIParser {
         var buffer = String()
         buffer.reserveCapacity(text.count)
         var i = text.startIndex
-        var atStartOfLine = pendingCR // Stateful: cursor moved to start of line, waiting to overwrite
+        var isCRPending = pendingCR
         
         while i < text.endIndex {
             let ch = text[i]
             
             if ch == "\r" {
-                // If next is \n, it's a standard newline sequence.
                 let nextIndex = text.index(after: i)
                 if nextIndex < text.endIndex, text[nextIndex] == "\n" {
-                    if atStartOfLine {
-                        clearCurrentLine(&buffer)
-                        atStartOfLine = false
-                    }
+                    // Standard CRLF -> LF
                     buffer.append("\n")
+                    isCRPending = false
                     i = text.index(after: nextIndex)
                     continue
                 }
-                
-                atStartOfLine = true
+                // Standalone CR: in log-mode, treat as a newline to avoid overwriting content
+                isCRPending = true
                 i = text.index(after: i)
                 continue
             } else if ch == "\n" {
-                if atStartOfLine {
-                    clearCurrentLine(&buffer)
-                    atStartOfLine = false
-                }
                 buffer.append("\n")
+                isCRPending = false
                 i = text.index(after: i)
             } else if ch == "\u{0008}" { // backspace
+                // In log-mode, we try to support simple backspaces but don't delete newlines
                 if !buffer.isEmpty, buffer.last != "\n" {
                     buffer.removeLast()
                 }
-                atStartOfLine = false
                 i = text.index(after: i)
             } else if ch == "\u{000C}" { // form feed
-                if atStartOfLine {
-                    clearCurrentLine(&buffer)
-                    atStartOfLine = false
-                }
                 buffer.append("\n\n-- Page Break --\n\n")
+                isCRPending = false
                 i = text.index(after: i)
             } else if ch == "\u{0007}" { // bell
                 i = text.index(after: i)
             } else {
-                if atStartOfLine {
-                    clearCurrentLine(&buffer)
-                    atStartOfLine = false
+                if isCRPending {
+                    buffer.append("\n")
+                    isCRPending = false
                 }
                 buffer.append(ch)
                 i = text.index(after: i)
             }
         }
-        return (buffer, atStartOfLine)
+        return (buffer, isCRPending)
     }
     
     private static func clearCurrentLine(_ buffer: inout String) {

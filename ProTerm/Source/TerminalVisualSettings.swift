@@ -247,7 +247,4 @@ class TerminalVisualSettings: ObservableObject {
     }
 }
 
-extension Notification.Name {
-    static let proTermIOSettingsDidChange = Notification.Name("ProTermIOSettingsDidChange")
-}
 

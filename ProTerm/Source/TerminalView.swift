@@ -27,6 +27,8 @@ struct TerminalView: View {
   @State private var hasRequestedInitialFocus = false  // Track if we've set initial focus
   @State private var commandFieldIsFocusedState: Bool = false  // Sync state for modifiers
   @State private var cachedAttributedOutput: AttributedString = AttributedString("")
+  @State private var cachedLines: [AttributedString] = []
+  @State private var lastProcessedOutput: String = ""
   @State private var hasPendingBracketedPaste = false
 
   @EnvironmentObject private var themeManager: ThemeManager
@@ -85,7 +87,7 @@ struct TerminalView: View {
         self.requestControllerFocus(reason: .manual)
         // Also broadcast a focus request to ensure AppKit first responder is set
         NotificationCenter.default.post(
-          name: Notification.Name("ProTermFocusCommandInput"), object: self.session.id)
+          name: .focusCommandInput, object: self.session.id)
       }
       return
     }
@@ -98,7 +100,7 @@ struct TerminalView: View {
         commandFieldIsFocused = true
         requestControllerFocus(reason: .manual)
         NotificationCenter.default.post(
-          name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+          name: .focusCommandInput, object: session.id)
       }
       return
     }
@@ -118,14 +120,14 @@ struct TerminalView: View {
         commandFieldIsFocused = true
         requestControllerFocus(reason: .manual)
         NotificationCenter.default.post(
-          name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+          name: .focusCommandInput, object: session.id)
       
       // Also try again after a bit more time in case output is still updating
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
           commandFieldIsFocused = true
           requestControllerFocus(reason: .manual)
           NotificationCenter.default.post(
-            name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+            name: .focusCommandInput, object: session.id)
       }
     }
   }
@@ -252,23 +254,12 @@ struct TerminalView: View {
           applyRedo()
         }
       }
-      // Listen for focus command input (targeted by session UUID, or nil for current session)
-      .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermFocusCommandInput"))) { note in
-        // If notification has a specific session ID, only focus if it matches
-        // If notification has nil (no specific session), focus this session
-        let shouldFocus: Bool
-        if let targetId = note.object as? UUID {
-          shouldFocus = targetId == session.id
-        } else {
-          // No specific session ID - focus this session (useful for startup)
-          shouldFocus = true
-        }
-
-        if shouldFocus {
-          Task { @MainActor in
-            guard !self.showPasswordInput else { return }
-            forceFocus(reason: .notification)
-          }
+      .onReceive(NotificationCenter.default.publisher(for: .focusCommandInput)) { note in
+        let targetId = note.object as? UUID
+        if (targetId == session.id) || (targetId == nil) {
+            if !self.showPasswordInput {
+                self.forceFocus(reason: .notification)
+            }
         }
       }
       // Listen for command history sheet
@@ -319,7 +310,7 @@ struct TerminalView: View {
       }
       // Listen for terminal bell
       .onReceive(
-        NotificationCenter.default.publisher(for: Notification.Name("ProTermTerminalBell"))
+        NotificationCenter.default.publisher(for: .terminalBell)
       ) { notification in
         if let sessionId = notification.object as? UUID, sessionId == session.id {
           handleTerminalBell()
@@ -336,10 +327,11 @@ struct TerminalView: View {
       let verticalPadding = CGFloat(appearance.verticalPadding)
       let lineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
       let availableWidth = max(40, geo.size.width - horizontalPadding * 2)
+      let availableHeight = max(40, geo.size.height - verticalPadding * 2)
 
       ZStack {
         HStack(alignment: .top, spacing: 0) {
-          scrollContent(geo: geo, availableWidth: availableWidth)
+          scrollContent(geo: geo, availableWidth: availableWidth, availableHeight: availableHeight)
         }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -428,10 +420,10 @@ struct TerminalView: View {
   // MARK: - Scroll Content
 
   @ViewBuilder
-  private func scrollContent(geo: GeometryProxy, availableWidth: CGFloat) -> some View {
+  private func scrollContent(geo: GeometryProxy, availableWidth: CGFloat, availableHeight: CGFloat) -> some View {
     ScrollViewReader { proxy in
       ZStack(alignment: .topTrailing) {
-        scrollViewContent(geo: geo, proxy: proxy, availableWidth: availableWidth)
+        scrollViewContent(geo: geo, proxy: proxy, availableWidth: availableWidth, availableHeight: availableHeight)
         processIndicatorOverlay
       }
       .onAppear {
@@ -462,7 +454,7 @@ struct TerminalView: View {
 
   @ViewBuilder
   private func scrollViewContent(
-    geo: GeometryProxy, proxy: ScrollViewProxy, availableWidth: CGFloat
+    geo: GeometryProxy, proxy: ScrollViewProxy, availableWidth: CGFloat, availableHeight: CGFloat
   ) -> some View {
     ScrollView(.vertical) {
       if shouldUseVirtualScrolling {
@@ -470,13 +462,26 @@ struct TerminalView: View {
           virtualScrolledOutput(availableWidth: availableWidth)
           commandInputArea
           Color.clear.frame(height: 1).id("BOTTOM")
+            .onAppear {
+              terminalManager.scrollPositions[session.id] = 1.0
+            }
+            .onDisappear {
+              terminalManager.scrollPositions[session.id] = 0.0
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       } else {
         VStack(alignment: .leading, spacing: 0) {
           outputLineWithNumbers(availableWidth: availableWidth)
+            .frame(maxWidth: .infinity, alignment: .leading)
           commandInputArea
           Color.clear.frame(height: 1).id("BOTTOM")
+            .onAppear {
+              terminalManager.scrollPositions[session.id] = 1.0
+            }
+            .onDisappear {
+              terminalManager.scrollPositions[session.id] = 0.0
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
@@ -485,18 +490,19 @@ struct TerminalView: View {
     .scrollIndicators(.visible)
     .onChange(of: session.output) { _, _ in
       updateCachedAttributedOutput()
+
       // Logic: Only auto-scroll if:
       // 1. We're showing pagination (always show new pages)
       // 2. Auto-scroll is enabled AND user is already at bottom (Standard "Follow Tail" behavior)
       // 3. User is actively typing (they want to see their input)
       let wasAtBottom = terminalManager.scrollPositions[session.id] ?? 1.0 >= 0.9
       let userIsTyping = lastTypingTime.map { Date().timeIntervalSince($0) < 1.0 } ?? false
-      
+
       if showPaginationInput || (visualSettings.autoScroll && wasAtBottom) || userIsTyping {
         DispatchQueue.main.async {
           // Perform immediate scroll
           proxy.scrollTo("BOTTOM", anchor: .bottom)
-          
+
           // Redundant follow-up to catch layout settling in high-volume dumps
           DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             proxy.scrollTo("BOTTOM", anchor: .bottom)
@@ -548,8 +554,8 @@ struct TerminalView: View {
       
       // Listen for pagination key sends to update cooldown
       NotificationCenter.default.addObserver(forName: Notification.Name("ProTermPaginationKeySent"), object: nil, queue: .main) { [weak session] _ in
-        guard let _ = session else { return }
-        Task { @MainActor in
+        MainActor.assumeIsolated {
+          guard session != nil else { return }
           self.lastPaginationKeySentTime = Date()
         }
       }
@@ -560,8 +566,7 @@ struct TerminalView: View {
         commandFieldIsFocused = true
       }
     }
-    .background(ScrollPositionTracker(sessionId: session.id, terminalManager: terminalManager))
-    .frame(width: availableWidth, height: geo.size.height)
+    .frame(width: availableWidth, height: availableHeight)
     .clipped()
   }
 
@@ -580,14 +585,19 @@ struct TerminalView: View {
             .padding(.top, 4)
       }
       
+      // Use the same Text view for both SSH and normal sessions for consistent scrolling
       Text(split.body)
         .font(fontManager.font)
         .foregroundColor(themeManager.current.foreground)
         .textSelection(.enabled) // RESTORE HIGHLIGHT AND COPY
         .lineSpacing(0)
+        .multilineTextAlignment(.leading)
         .frame(width: textWidth, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: false)  // Allow full height expansion
         .padding(.top, 4)
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .layoutPriority(1) // Ensure this content expands properly for scrolling
   }
 
   @ViewBuilder
@@ -818,20 +828,18 @@ struct TerminalView: View {
               // Use multiple attempts to ensure focus is restored
               for delay in [0.5, 1.0, 1.5] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                  Task { @MainActor in
                     // Only restore focus if we're not in password or pagination mode
                     if !self.showPasswordInput && !self.showPaginationInput {
                       self.commandFieldIsFocused = true
                       self.requestControllerFocus(reason: .manual)
                       NotificationCenter.default.post(
-                        name: Notification.Name("ProTermFocusCommandInput"), object: self.session.id)
+                        name: .focusCommandInput, object: self.session.id)
                       // Ensure window is key
                       NSApp.activate(ignoringOtherApps: true)
                       if let window = NSApplication.shared.mainWindow {
                         window.makeKeyAndOrderFront(nil)
                       }
                     }
-                  }
                 }
               }
             } else if !cmd.isEmpty {
@@ -918,10 +926,8 @@ struct TerminalView: View {
       // Use multiple attempts with increasing delays to ensure focus is set on startup
       for delay in [0.05, 0.15, 0.3, 0.5] {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-          Task { @MainActor in
             // Use allowActivation: true to ensure focus works even on initial startup
             self.forceFocus(reason: .viewAppeared, allowActivation: true)
-          }
         }
       }
     }
@@ -934,7 +940,7 @@ struct TerminalView: View {
             self.commandFieldIsFocused = true
             self.requestControllerFocus(reason: .manual)
             NotificationCenter.default.post(
-              name: Notification.Name("ProTermFocusCommandInput"), object: self.session.id)
+              name: .focusCommandInput, object: self.session.id)
             // Also ensure window is key and front
             NSApp.activate(ignoringOtherApps: true)
             if let window = NSApplication.shared.mainWindow {
@@ -948,10 +954,7 @@ struct TerminalView: View {
       if !session.isProcessRunning && commandFieldIsFocused {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
           if !session.isProcessRunning && commandFieldIsFocused {
-            Task { @MainActor in
               commandFieldIsFocused = true
-              requestControllerFocus(reason: .manual)
-            }
           }
         }
       }
@@ -1113,7 +1116,7 @@ struct TerminalView: View {
                                       self.focusCommandFieldInView(contentView, allowActivation: true)
                                   }
                                   // Post notification to trigger focus as well
-                                  NotificationCenter.default.post(name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+                                  NotificationCenter.default.post(name: .focusCommandInput, object: session.id)
                               }
                           }
                       }
@@ -1201,20 +1204,28 @@ struct TerminalView: View {
   }
 
   // Check if we should use virtual scrolling (for large outputs)
+  // LazyVStack handles large outputs much better than a single giant Text view
   private var shouldUseVirtualScrolling: Bool {
+    // Use cached lines count if available for better performance
+    if !cachedLines.isEmpty {
+      return cachedLines.count > 5
+    }
     let outputLines = session.output.components(separatedBy: .newlines).count
-    return outputLines > 10000
+    // Use virtual scrolling for most outputs to ensure performance and proper scroll tracking
+    return outputLines > 5
   }
 
   // Virtual scrolled output - splits into lines for LazyVStack
   @ViewBuilder
   private func virtualScrolledOutput(availableWidth: CGFloat) -> some View {
-    let split = calculateOutputSplit()
-    let lines = splitOutputIntoLines(from: split.body)
+    let lines = cachedLines
     let lineNumberWidth: CGFloat = visualSettings.showLineNumbers ? 29.0 : 0.0  // 23 + 6 padding
     let textWidth = availableWidth - lineNumberWidth
     
-    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+    // Use the index as ID for now since we append mostly. 
+    // In a future update, we can use a more stable ID if we store lines in TerminalSession.
+    ForEach(0..<lines.count, id: \.self) { index in
+      let line = lines[index]
       HStack(alignment: .firstTextBaseline, spacing: 0) {
         if visualSettings.showLineNumbers {
           Text("\(index + 1)")
@@ -1222,54 +1233,62 @@ struct TerminalView: View {
             .foregroundColor(.gray)
             .frame(width: 23, alignment: .trailing)
             .padding(.trailing, 6)
-            .padding(.vertical, 4)
         }
         Text(line)
           .frame(width: textWidth, alignment: .leading)
           .fixedSize(horizontal: false, vertical: true)
           .padding(.leading, visualSettings.showLineNumbers ? 0 : 10)
           .padding(.trailing, 0)
-          .padding(.vertical, 4)
           .font(fontManager.font)
           .foregroundColor(themeManager.current.foreground)
       }
       .id("line-\(index)")
     }
+    // Add a spacer at the end to ensure ScrollView calculates full height
+    Spacer()
+      .frame(height: 1)
   }
 
-  // Split output into individual lines for virtual scrolling
+  // Split output into individual lines for virtual scrolling while PRESERVING attributes
   private func splitOutputIntoLines(from fullOutput: AttributedString) -> [AttributedString] {
     let string = String(fullOutput.characters)
-    let lines = string.components(separatedBy: .newlines)
-
-    // Convert back to AttributedString lines (simplified - preserves basic formatting)
-    return lines.map { line in
-      // Try to preserve attributes from original if possible
-      // For now, create simple attributed strings
-      var attributed = AttributedString(line)
-      // Apply search highlighting if needed
-      if !searchQuery.isEmpty {
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        if useRegex {
-          if let range = attributed.range(of: q, options: .regularExpression) {
-            attributed[range].backgroundColor = Color.yellow.opacity(0.35)
-          }
+    if string.isEmpty { return [] }
+    
+    var lines: [AttributedString] = []
+    var searchStartIndex = string.startIndex
+    
+    while searchStartIndex < string.endIndex {
+      if let newlineRange = string.range(of: "\n", range: searchStartIndex..<string.endIndex) {
+        let lineRange = searchStartIndex..<newlineRange.lowerBound
+        if let attributedRange = Range(lineRange, in: fullOutput) {
+          lines.append(AttributedString(fullOutput[attributedRange]))
         } else {
-          if let range = attributed.range(of: q, options: .caseInsensitive) {
-            attributed[range].backgroundColor = Color.yellow.opacity(0.35)
-          }
+          lines.append(AttributedString(string[lineRange]))
         }
+        searchStartIndex = newlineRange.upperBound
+      } else {
+        let lineRange = searchStartIndex..<string.endIndex
+        if let attributedRange = Range(lineRange, in: fullOutput) {
+          lines.append(AttributedString(fullOutput[attributedRange]))
+        } else {
+          lines.append(AttributedString(string[lineRange]))
+        }
+        break
       }
-      return attributed
     }
+    
+    // If output ends with a newline, add an empty line at the end
+    if string.hasSuffix("\n") {
+      lines.append(AttributedString(""))
+    }
+    
+    return lines
   }
 
-  @MainActor
   private func handleViewAppear() {
     // Aggressively set initial focus with multiple attempts
     for delay in [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0] {
       DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-        Task { @MainActor in
           // Set the SwiftUI focus state
           self.commandFieldIsFocused = true
           
@@ -1287,7 +1306,6 @@ struct TerminalView: View {
           
           // Also use the focus controller
           self.requestControllerFocus(reason: .viewAppeared)
-        }
       }
     }
   }
@@ -1527,7 +1545,7 @@ struct TerminalView: View {
            self.session.isProcessRunning {
           // Check via notification to avoid capturing view state
           NotificationCenter.default.post(
-            name: Notification.Name("ProTermFocusCommandInput"), object: sessionId)
+            name: .focusCommandInput, object: sessionId)
         }
       }
     }
@@ -1574,6 +1592,13 @@ struct TerminalView: View {
   private func updateCachedAttributedOutput() {
     // Ensure we're using the correct session's output
     let sessionOutput = session.output
+    
+    // Performance optimization: Avoid re-parsing and re-splitting if output hasn't changed
+    // and we already have cached lines.
+    if sessionOutput == lastProcessedOutput && !cachedLines.isEmpty {
+      return
+    }
+    
     var attributed = ANSIParser.parse(sessionOutput, baseFont: fontManager.font)
     let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -1630,6 +1655,11 @@ struct TerminalView: View {
     }
 
     cachedAttributedOutput = attributed
+    
+    // Update cached lines for virtual scrolling
+    let split = calculateOutputSplit()
+    cachedLines = splitOutputIntoLines(from: split.body)
+    lastProcessedOutput = sessionOutput
   }
 
   // MARK: - Pagination Prompt Detection
@@ -1747,7 +1777,7 @@ struct TerminalView: View {
             self.commandFieldIsFocused = true
             self.requestControllerFocus(reason: .manual)
             NotificationCenter.default.post(
-              name: Notification.Name("ProTermFocusCommandInput"), object: self.session.id)
+              name: .focusCommandInput, object: self.session.id)
             NSApp.activate(ignoringOtherApps: true)
             if let window = NSApplication.shared.mainWindow {
               window.makeKeyAndOrderFront(nil)
@@ -1906,7 +1936,7 @@ struct TerminalView: View {
       DispatchQueue.main.async {
         commandFieldIsFocused = true
         NotificationCenter.default.post(
-          name: Notification.Name("ProTermFocusCommandInput"), object: session.id)
+          name: .focusCommandInput, object: session.id)
       }
     }
   }
@@ -1998,12 +2028,10 @@ struct TerminalView: View {
     }
   }
 
-  @MainActor
   private func presentHistoryIfNeeded() {
     showingHistorySheet = true
   }
 
-  @MainActor
   private func showSystemInfo() {
     let info = session.getSystemInfo()
     // Append system info to output with proper formatting
@@ -2434,23 +2462,6 @@ struct LineCountPreferenceKey: PreferenceKey {
   }
 }
 
-// MARK: - Scroll Position Tracking
-// Simplified scroll position tracking - saves whether user was at bottom
-// Full position restoration would require more complex ScrollView offset tracking
-struct ScrollPositionTracker: View {
-  let sessionId: UUID
-  @ObservedObject var terminalManager: TerminalManager
-
-  var body: some View {
-    Color.clear
-      .onAppear {
-        // Initialize scroll position to bottom if not set
-        if terminalManager.scrollPositions[sessionId] == nil {
-          terminalManager.scrollPositions[sessionId] = 1.0
-        }
-      }
-  }
-}
 
 // MARK: - Line Numbers View
 
@@ -2486,5 +2497,92 @@ struct LineNumbersView: View {
     return (1...count)
       .map { "\($0)" }
       .joined(separator: "\n")
+  }
+}
+
+// MARK: - Scrollable Output Text View for SSH Sessions
+
+/// Custom NSTextView subclass that properly reports intrinsic content size
+class ScrollableNSTextView: NSTextView {
+  override var intrinsicContentSize: NSSize {
+    guard let textContainer = self.textContainer,
+          let layoutManager = self.layoutManager else {
+      return super.intrinsicContentSize
+    }
+    
+    layoutManager.ensureLayout(for: textContainer)
+    let usedRect = layoutManager.usedRect(for: textContainer)
+    return NSSize(width: NSView.noIntrinsicMetric, height: max(usedRect.height, 1))
+  }
+  
+  override func layout() {
+    super.layout()
+    invalidateIntrinsicContentSize()
+  }
+}
+
+/// NSTextView-based output view that properly calculates full content height for scrolling
+struct ScrollableOutputTextView: NSViewRepresentable {
+  let attributedString: AttributedString
+  let font: Font
+  let textColor: Color
+  let width: CGFloat
+  
+  func makeNSView(context: Context) -> ScrollableNSTextView {
+    let textView = ScrollableNSTextView()
+    
+    textView.isEditable = false
+    textView.isSelectable = true
+    textView.drawsBackground = false
+    textView.textContainerInset = .zero
+    textView.isAutomaticSpellingCorrectionEnabled = false
+    
+    // Configure text container to allow full height calculation
+    if let textContainer = textView.textContainer {
+      textContainer.widthTracksTextView = false
+      textContainer.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+      textContainer.lineFragmentPadding = 0
+    }
+    
+    textView.isHorizontallyResizable = false
+    textView.isVerticallyResizable = true
+    textView.minSize = NSSize(width: width, height: 0)
+    textView.maxSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+    
+    // Set initial content
+    updateNSView(textView, context: context)
+    
+    return textView
+  }
+  
+  func updateNSView(_ textView: ScrollableNSTextView, context: Context) {
+    // Convert SwiftUI AttributedString to NSAttributedString
+    let nsAttributedString = NSAttributedString(attributedString)
+    
+    // Apply font and color
+    let mutableString = NSMutableAttributedString(attributedString: nsAttributedString)
+    let range = NSRange(location: 0, length: mutableString.length)
+    
+    // Apply text color
+    mutableString.addAttribute(.foregroundColor, value: NSColor(textColor), range: range)
+    
+    // Update text storage
+    if let textStorage = textView.textStorage {
+      textStorage.beginEditing()
+      textStorage.setAttributedString(mutableString)
+      textStorage.endEditing()
+    }
+    
+    // Ensure layout calculates full height
+    if let textContainer = textView.textContainer {
+      textContainer.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+      textView.layoutManager?.ensureLayout(for: textContainer)
+      
+      // Invalidate intrinsic content size to force recalculation
+      textView.invalidateIntrinsicContentSize()
+    }
+    
+    textView.needsDisplay = true
+    textView.needsLayout = true
   }
 }

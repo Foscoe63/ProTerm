@@ -47,6 +47,9 @@
 - ✅ **Output streaming** - Real-time output display
 - ✅ **ANSI color support** - Color parsing and display
 - ✅ **Search in output** - Search and highlight text in terminal
+- ✅ **Regex search** - Advanced regex search in terminal output
+- ✅ **Search history** - Remember previous search queries
+- ✅ **Performance optimizations** - Virtual scrolling, lazy rendering for large outputs
 - ✅ **Find in terminal** - Find text functionality
 - ✅ **Replace in terminal** - Find and replace functionality
 
@@ -67,8 +70,6 @@
 
 ### Terminal Enhancements
 - ⏳ **Split panes** - Horizontal/vertical split with resizable panes (data structures exist)
-- ⏳ **Regex search** - Advanced regex search in terminal output
-- ⏳ **Search history** - Remember previous search queries
 - ⏳ **Replace with preview** - Preview replacements before applying
 
 ### Visual Enhancements
@@ -94,7 +95,6 @@
 ### Advanced Features
 - ⏳ **Terminal recording** - Record terminal sessions
 - ⏳ **Terminal playback** - Playback recorded sessions
-- ⏳ **Performance optimizations** - Virtual scrolling, lazy rendering for large outputs
 - ⏳ **Auto-completion improvements** - Fuzzy matching and context-aware completion
 
 ### Keyboard Shortcuts

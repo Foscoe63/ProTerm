@@ -95,7 +95,7 @@ struct WindowAccessor: NSViewRepresentable {
                     }
                     // Post focus notification
                     NotificationCenter.default.post(
-                        name: Notification.Name("ProTermFocusCommandInput"),
+                        name: .focusCommandInput,
                         object: nil
                     )
                 }
@@ -150,7 +150,7 @@ struct WindowAccessor: NSViewRepresentable {
             
             // Broadcast a focus request so any TerminalView that's already mounted can focus its input
             NotificationCenter.default.post(
-                name: Notification.Name("ProTermFocusCommandInput"),
+                name: .focusCommandInput,
                 object: nil
             )
 
@@ -173,7 +173,7 @@ struct WindowAccessor: NSViewRepresentable {
                     // When window becomes key (like when clicking back), focus immediately
                     // Also broadcast a focus request so the active TerminalView can enforce focus
                     NotificationCenter.default.post(
-                        name: Notification.Name("ProTermFocusCommandInput"),
+                        name: .focusCommandInput,
                         object: nil
                     )
                     // Ensure MainActor isolation when calling a @MainActor method
@@ -198,7 +198,7 @@ struct WindowAccessor: NSViewRepresentable {
                 // Now start aggressive focus attempts
                 // Post one more broadcast in case the TerminalView mounted slightly later
                 NotificationCenter.default.post(
-                    name: Notification.Name("ProTermFocusCommandInput"),
+                    name: .focusCommandInput,
                     object: nil
                 )
                 self.focusCommandInput(in: window, retryCount: 0)
@@ -273,7 +273,7 @@ struct WindowAccessor: NSViewRepresentable {
             // Also post notification as fallback for TerminalView to handle
             // This ensures TerminalView's onReceive handler also gets triggered
             NotificationCenter.default.post(
-                name: Notification.Name("ProTermFocusCommandInput"),
+                name: .focusCommandInput,
                 object: nil // TerminalView will handle focus for the current session
             )
             
