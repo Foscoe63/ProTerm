@@ -495,10 +495,13 @@ struct TerminalView: View {
       // 1. We're showing pagination (always show new pages)
       // 2. Auto-scroll is enabled AND user is already at bottom (Standard "Follow Tail" behavior)
       // 3. User is actively typing (they want to see their input)
+      // 4. A pagination key was just sent (space/enter) – this covers the brief moment when
+      //    the pagination prompt disappears before new output arrives.
       let wasAtBottom = terminalManager.scrollPositions[session.id] ?? 1.0 >= 0.9
       let userIsTyping = lastTypingTime.map { Date().timeIntervalSince($0) < 1.0 } ?? false
+      let paginationJustSent = lastPaginationKeySentTime.map { Date().timeIntervalSince($0) < 0.5 } ?? false
 
-      if showPaginationInput || (visualSettings.autoScroll && wasAtBottom) || userIsTyping {
+      if showPaginationInput || (visualSettings.autoScroll && wasAtBottom) || userIsTyping || paginationJustSent {
         DispatchQueue.main.async {
           // Perform immediate scroll
           proxy.scrollTo("BOTTOM", anchor: .bottom)
