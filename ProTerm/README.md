@@ -10,7 +10,6 @@ ProTerm is a SwiftUI‑based macOS app that mimics the look and feel of Apple’
 - Split‑pane placeholder for future side‑by‑side sessions
 - SSH session support (via built‑in `ssh` process)
 - Command history, notifications on command completion, and crash reporting
-- Integration point for macOS 26 built‑in AI (Apple Intelligence) via `AIIntegration`
 - Export/Print utilities, plugin architecture, and more.
 
 All source files live under `/Users/ewg/ProTerm`.
@@ -31,11 +30,8 @@ ProTerm/
 │   ├─ PreferencesView.swift
 │   ├─ SSHSessionManager.swift
 │   ├─ SessionPersistence.swift
-│   ├─ ExportPrintManager.swift
 │   ├─ NotificationHelper.swift
-│   ├─ PluginManager.swift
 │   ├─ CrashReporter.swift
-│   └─ AIIntegration.swift
 ├─ README.md                   # This file
 └─ (Xcode project will be generated in the same folder)
 ```
@@ -61,13 +57,11 @@ ProTerm/
 | **Drag‑and‑drop** | Drop any text file onto the window – it opens in a new read‑only tab. |
 | **Export / Print** | Right‑click the terminal view (future context menu) – calls `ExportPrintManager.shared`. |
 | **Notifications** | When a session is closed or a long‑running command finishes you’ll see a macOS notification. |
-| **AI Assistant** | Use the `AIPromptView` (found in `AIIntegration.swift`) to send a prompt and receive a placeholder answer. Replace the stub with Apple’s real AI SDK when it ships. |
 | **Plugins** | Place a compiled `.bundle` inside `ProTerm.app/Contents/PlugIns`; the app will enumerate them at launch. |
 | **Crash reporting** | Uncaught exceptions are logged to `~/Library/Caches/ProTermCrash.log`. |
 
 ## Extending the App
 - **Split‑pane UI** – replace `ContentView`’s single `TabView` with a custom split view that hosts two `TerminalView`s side‑by‑side.
-- **Full AI integration** – swap the mock implementation in `AIIntegration.swift` with Apple’s official `AIAssistant` API (once documented). 
 - **Keyboard shortcut customizer** – flesh out `ShortcutSettings` to let users bind actions (new tab, close tab, etc.) using the new `KeyboardShortcut` API.
 - **Plugin ecosystem** – define a protocol that plugins must conform to (e.g., `ProTermPlugin`) and load them dynamically via `Bundle.load()`. 
 

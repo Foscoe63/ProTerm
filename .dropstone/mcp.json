@@ -1,0 +1,41 @@
+{
+  "mcpServers": {
+    "ddg-search": {
+      "command": "uvx",
+      "args": [
+        "duckduckgo-mcp-server"
+      ]
+    },
+    "fast-filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "fast-filesystem-mcp",
+        "/Users/ewg/CodingDocs",
+        "/Users/ewg",
+        "/Volumes/Storage",
+        "/"
+      ]
+    },
+    "prompt-optimizer": {
+      "command": "python3.10",
+      "args": [
+        "/Volumes/AppsX/MCP-SERVERS-2/mcp-prompt-optimizer/prompt_optimizer.py"
+      ],
+      "env": {}
+    },
+    "wn01011-llm-token-tracker": {
+      "command": "node",
+      "args": [
+        "/Volumes/AppsX/MCP-SERVERS/llm-token-tracker/dist/mcp-server.js"
+      ]
+    },
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    }
+  }
+}

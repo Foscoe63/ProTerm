@@ -434,7 +434,7 @@ class CustomNSTextField: NSTextField {
             
             // Debug logging to help troubleshoot pagination issues
             #if DEBUG
-            print("[Pagination] KeyDown: keyCode=\(keyCode), char=\(characters)")
+            // print("[Pagination] KeyDown: keyCode=\(keyCode), char=\(characters)")
             #endif
             
             // Space key (keyCode 49) or 'q'/'Q' key or Enter key
@@ -1112,7 +1112,7 @@ class CustomFieldEditor: NSTextView {
             
             // Debug logging to help troubleshoot pagination issues
             #if DEBUG
-            print("[Pagination-Editor] KeyDown: keyCode=\(keyCode), char=\(characters)")
+            // print("[Pagination-Editor] KeyDown: keyCode=\(keyCode), char=\(characters)")
             #endif
             
             // Space key (keyCode 49) or 'q'/'Q' key or Enter key
