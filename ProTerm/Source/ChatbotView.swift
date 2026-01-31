@@ -233,16 +233,40 @@ struct ChatbotView: View {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
+        // Enhanced system message for terminal-aware responses
+        let workingDir = FileManager.default.homeDirectoryForCurrentUser.path
+        let systemPrompt = """
+        You are an AI assistant integrated into ProTerm terminal emulator on macOS.
+        
+        Current Context:
+        - Working Directory: \(workingDir)
+        - Shell: zsh (default)
+        
+        Guidelines:
+        1. Provide accurate macOS terminal commands
+        2. Include practical examples and error handling
+        3. Consider current working directory for file paths
+        4. Suggest modern macOS alternatives (open, pbcopy, pbpaste)
+        5. Include relevant flags and options for commands
+        6. Be helpful with development tools (git, npm, brew)
+        7. Keep responses concise but comprehensive
+        8. Prioritize security and best practices
+        """
+        
         let body: [String: Any] = [
             "model": aiManager.lmStudioModel.isEmpty ? "local-model" : aiManager.lmStudioModel,
             "messages": [
+                [
+                    "role": "system",
+                    "content": systemPrompt
+                ],
                 [
                     "role": "user",
                     "content": query
                 ]
             ],
             "temperature": 0.7,
-            "max_tokens": 1000
+            "max_tokens": 1500  // Increased for contextual responses
         ]
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)

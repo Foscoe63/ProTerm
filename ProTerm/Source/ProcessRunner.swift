@@ -51,6 +51,12 @@ final class ProcessRunner {
         env["LSCOLORS"] = env["LSCOLORS"] ?? "Gxfxcxdxbxegedabagacad"
         env["GIT_PAGER"] = "cat"
         env["GIT_CONFIG_PARAMETERS"] = "'color.ui=always'"
+        
+        // Ensure PATH always exists with sensible defaults
+        if env["PATH"] == nil {
+            env["PATH"] = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+        }
+        
         proc.environment = env
 
         let pipe = Pipe()

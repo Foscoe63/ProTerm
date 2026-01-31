@@ -519,6 +519,14 @@ class IntegrationFeatures: NSObject, ObservableObject {
         savePlugins()
     }
     
+    func togglePlugin(_ plugin: Plugin) {
+        if plugin.isEnabled {
+            disablePlugin(plugin)
+        } else {
+            enablePlugin(plugin)
+        }
+    }
+    
     private func loadPlugins() {
         if let data = UserDefaults.standard.data(forKey: "ProTermPlugins"),
            let loadedPlugins = try? JSONDecoder().decode([Plugin].self, from: data) {

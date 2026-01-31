@@ -834,8 +834,15 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       let cArgs = sshArgs.map { strdup($0) }
       let argvPointers: [UnsafeMutablePointer<CChar>?] = cArgs.map { $0 } + [nil]
       
-      // Environment
-      let envVars = ["TERM": "xterm"]
+      // Environment - inherit current environment to ensure PATH and other vars are available
+      var envVars = ProcessInfo.processInfo.environment
+      envVars["TERM"] = "xterm"  // Ensure TERM is set for SSH compatibility
+      
+      // Ensure PATH always exists with sensible defaults
+      if envVars["PATH"] == nil {
+          envVars["PATH"] = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+      }
+      
       let cEnvStrings = envVars.map { strdup("\($0.key)=\($0.value)") }
       let envPointers: [UnsafeMutablePointer<CChar>?] = cEnvStrings.map { $0 } + [nil]
       

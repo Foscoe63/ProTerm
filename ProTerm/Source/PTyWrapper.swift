@@ -92,13 +92,31 @@ final class PTYWrapper: @unchecked Sendable {
         }
         cArgs.append(nil)
 
-        // Build environment if supplied
+        // Build environment if supplied, otherwise inherit current environment
         var cEnv: [UnsafeMutablePointer<CChar>?] = []
+        let envToUse: [String: String]
         if let envDict = env {
-            for (k, v) in envDict {
-                let pair = "\(k)=\(v)"
-                cEnv.append(strdup(pair))
+            envToUse = envDict
+        } else {
+            // Inherit parent environment and ensure critical variables
+            var inherited = ProcessInfo.processInfo.environment
+            inherited["TERM"] = inherited["TERM"] ?? "xterm-256color"
+            
+            // Ensure PATH includes Homebrew
+            if let existingPath = inherited["PATH"] {
+                if !existingPath.contains("/opt/homebrew") {
+                    inherited["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:\(existingPath)"
+                }
+            } else {
+                inherited["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             }
+            
+            envToUse = inherited
+        }
+        
+        for (k, v) in envToUse {
+            let pair = "\(k)=\(v)"
+            cEnv.append(strdup(pair))
         }
         cEnv.append(nil)
 
@@ -107,7 +125,7 @@ final class PTYWrapper: @unchecked Sendable {
         posix_spawnattr_init(&attr)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
         
-        let spawnResult = posix_spawn(&pid, command, &fileActions, &attr, cArgs, env != nil ? cEnv : nil)
+        let spawnResult = posix_spawn(&pid, command, &fileActions, &attr, cArgs, cEnv)
         posix_spawnattr_destroy(&attr)
         
         if spawnResult != 0 {
@@ -129,10 +147,8 @@ final class PTYWrapper: @unchecked Sendable {
             for ptr in cArgs where ptr != nil {
                 free(ptr)
             }
-            if env != nil {
-                for ptr in cEnv where ptr != nil {
-                    free(ptr)
-                }
+            for ptr in cEnv where ptr != nil {
+                free(ptr)
             }
     
     }
@@ -263,14 +279,45 @@ final class PTYWrapper: @unchecked Sendable {
         cArgs.append(strdup(command))
         cArgs.append(nil)
         
-        // Spawn
-        let spawnResult = posix_spawn(&pid, shellPath, &fileActions, nil, cArgs, nil)
+        // Build environment - inherit current environment and ensure critical variables are set
+        var envVars = ProcessInfo.processInfo.environment
+        envVars["TERM"] = envVars["TERM"] ?? "xterm-256color"
+        
+        // Ensure PATH includes Homebrew locations
+        if let existingPath = envVars["PATH"] {
+            if !existingPath.contains("/opt/homebrew") {
+                envVars["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:\(existingPath)"
+            }
+        } else {
+            envVars["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        }
+        
+        // Set HOME if not already set
+        if envVars["HOME"] == nil {
+            envVars["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
+        }
+        
+        // Set working directory in environment
+        envVars["PWD"] = cwd.path
+        
+        // Build C-style environment array
+        var cEnv: [UnsafeMutablePointer<CChar>?] = []
+        for (k, v) in envVars {
+            cEnv.append(strdup("\(k)=\(v)"))
+        }
+        cEnv.append(nil)
+        
+        // Spawn with environment
+        let spawnResult = posix_spawn(&pid, shellPath, &fileActions, nil, cArgs, cEnv)
         if spawnResult != 0 {
             throw NSError(domain: "PTYWrapper", code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: "posix_spawn failed"])
         }
         
         // Clean up C strings
         for ptr in cArgs where ptr != nil {
+            free(ptr)
+        }
+        for ptr in cEnv where ptr != nil {
             free(ptr)
         }
         
