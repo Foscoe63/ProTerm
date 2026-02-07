@@ -29,6 +29,10 @@ struct TerminalInputBar: View {
     }
 }
 
-#Preview {
-    TerminalInputBar(viewModel: TerminalInputViewModel())
+#if DEBUG
+struct TerminalInputBar_Previews: PreviewProvider {
+    static var previews: some View {
+        TerminalInputBar(viewModel: TerminalInputViewModel())
+    }
 }
+#endif

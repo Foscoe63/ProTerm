@@ -37,7 +37,7 @@ int proterm_forkpty_spawn(const char *shell_path, const char *command,
 
   if (pid == 0) {
     // Child: exec shell with -l -c command, inheriting current environment
-    // This ensures user's custom PATH (from ~/.zshrc, ~/.zprofile, etc.) is available
+    // This ensures user's custom PATH (from ~/.zprofile) is available
     extern char **environ;
     execve(shell_path, (char *[]){(char *)shell_path, "-l", "-c", (char *)command, NULL}, environ);
     _exit(127);
@@ -67,8 +67,10 @@ int proterm_forkpty_exec(const char *command_path, char *const argv[],
   }
 
   if (pid == 0) {
-    // Child: exec the command directly
-    execve(command_path, argv, envv);
+    // Child: exec shell with command, inheriting current environment
+    // This ensures user's custom PATH (from ~/.zshrc, ~/.bashrc, etc.) is available
+    extern char **environ;
+    execve(command_path, argv, environ);
     _exit(127);
   }
 
