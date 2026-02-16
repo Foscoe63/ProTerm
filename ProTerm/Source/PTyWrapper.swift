@@ -1,13 +1,6 @@
 import Foundation
 import Darwin
 
-// Terminal control structures
-#if os(macOS) || os(iOS)
-import Darwin.C
-#else
-import Glibc
-#endif
-
 /// PTYWrapper encapsulates a pseudo‑terminal for interactive subprocesses.
 final class PTYWrapper: @unchecked Sendable {
     // MARK: - Public API
@@ -15,76 +8,62 @@ final class PTYWrapper: @unchecked Sendable {
     /// Closure called whenever the PTY produces output.
     var onOutput: ((String) -> Void)?
 
+    /// Closure called when the child process exits.
+    var onExit: (() -> Void)?
+
     /// Indicates whether the child process is still running.
     var isRunning: Bool {
         guard childPID > 0 else { return false }
-        // kill with signal 0 checks existence without sending a signal
         return kill(childPID, 0) == 0
     }
 
+    private(set) var masterFD: Int32 = -1
+    private(set) var childPID: pid_t = 0
+    private var readSource: DispatchSourceRead?
+    private var utf8Remainder = Data()
+
     /// Initialise a PTY and spawn the given command.
-    /// - Parameters:
-    ///   - command: Full path to executable (e.g. `/bin/bash`).
-    ///   - args: Arguments passed to the command.
-    ///   - env: Optional environment dictionary.
     init(command: String, args: [String] = [], env: [String:String]? = nil) {
-        // 1️⃣ Create master PTY
         var master: Int32 = -1
         master = posix_openpt(O_RDWR)
-        guard master != -1 else {
-            fatalError("posix_openpt failed")
-        }
+        guard master != -1 else { fatalError("posix_openpt failed") }
 
-        // 2️⃣ Grant and unlock the slave side
         guard grantpt(master) == 0 else { fatalError("grantpt failed") }
         guard unlockpt(master) == 0 else { fatalError("unlockpt failed") }
 
-        // 3️⃣ Obtain slave device name
         guard let slaveNameC = ptsname(master) else { fatalError("ptsname failed") }
         let slavePath = String(cString: slaveNameC)
 
-        // 4️⃣ Open the slave side
         let slave = open(slavePath, O_RDWR)
         guard slave != -1 else { fatalError("open slave failed") }
         
-        // Standard terminal attributes are obtained. 
-        // We set the TTY to raw mode to disable local echo and line editing,
-        // as ProTerm handles these locally via its UI components.
         var tio = termios()
         if tcgetattr(slave, &tio) == 0 {
             cfmakeraw(&tio)
-            // Ensure we don't map CR to NL or vice versa on input/output
-            // so the PTY passes characters through exactly as received.
             tio.c_iflag &= ~UInt(ICRNL | INLCR | IGNCR)
             tio.c_oflag &= ~UInt(ONLCR | OCRNL)
             _ = tcsetattr(slave, TCSANOW, &tio)
         }
         
-        // Set window size on slave (SSH needs this)
-        // Read configured columns from UserDefaults (default: 80)
         let defaults = UserDefaults.standard
         let configuredColumns = defaults.object(forKey: "ProTermTerminalColumns") as? Int ?? 80
-        let columns = max(40, min(200, configuredColumns))  // Clamp to valid range
+        let columns = max(40, min(200, configuredColumns))
         
         var ws = winsize()
-        ws.ws_row = 24  // Default rows
-        ws.ws_col = UInt16(columns)  // Use configured columns
+        ws.ws_row = 24
+        ws.ws_col = UInt16(columns)
         ws.ws_xpixel = 0
         ws.ws_ypixel = 0
         _ = ioctl(slave, TIOCSWINSZ, &ws)
 
-        // 5️⃣ Spawn the process using posix_spawn
         var pid: pid_t = 0
         var fileActions: posix_spawn_file_actions_t? = nil
         posix_spawn_file_actions_init(&fileActions)
-        // Duplicate slave to stdio
         posix_spawn_file_actions_adddup2(&fileActions, slave, STDIN_FILENO)
         posix_spawn_file_actions_adddup2(&fileActions, slave, STDOUT_FILENO)
         posix_spawn_file_actions_adddup2(&fileActions, slave, STDERR_FILENO)
-        // Close master in child
         posix_spawn_file_actions_addclose(&fileActions, master)
 
-        // Build C‑style argv array
         var cArgs: [UnsafeMutablePointer<CChar>?] = []
         cArgs.append(strdup(command))
         for a in args {
@@ -92,141 +71,178 @@ final class PTYWrapper: @unchecked Sendable {
         }
         cArgs.append(nil)
 
-        // Build environment if supplied, otherwise inherit current environment
-        var cEnv: [UnsafeMutablePointer<CChar>?] = []
-        let envToUse: [String: String]
-        if let envDict = env {
-            envToUse = envDict
-        } else {
-            // Inherit parent environment and ensure critical variables
-            var inherited = ProcessInfo.processInfo.environment
-            inherited["TERM"] = inherited["TERM"] ?? "xterm-256color"
-            
-            // Ensure PATH includes Homebrew
-            if let existingPath = inherited["PATH"] {
-                if !existingPath.contains("/opt/homebrew") {
-                    inherited["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:\(existingPath)"
-                }
-            } else {
-                inherited["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        let userHome = ProcessContext.homePath
+        let opencodePath = "\(userHome)/.opencode/bin"
+        var envVars = env ?? ProcessInfo.processInfo.environment
+        envVars["TERM"] = envVars["TERM"] ?? "xterm-256color"
+        
+        if let existingPath = envVars["PATH"] {
+            if !existingPath.contains(opencodePath) {
+                envVars["PATH"] = "\(opencodePath):/opt/homebrew/bin:/opt/homebrew/sbin:\(existingPath)"
             }
-            
-            envToUse = inherited
+        } else {
+            envVars["PATH"] = "\(opencodePath):/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         }
         
-        for (k, v) in envToUse {
-            let pair = "\(k)=\(v)"
-            cEnv.append(strdup(pair))
+        var cEnv: [UnsafeMutablePointer<CChar>?] = []
+        for (k, v) in envVars {
+            cEnv.append(strdup("\(k)=\(v)"))
         }
         cEnv.append(nil)
 
-        // Spawn with SETSID to ensure controlling terminal is correctly established
-        var attr: posix_spawnattr_t?
+        var attr: posix_spawnattr_t? = nil
         posix_spawnattr_init(&attr)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
         
         let spawnResult = posix_spawn(&pid, command, &fileActions, &attr, cArgs, cEnv)
         posix_spawnattr_destroy(&attr)
+        posix_spawn_file_actions_destroy(&fileActions)
+        
+        if spawnResult == 0 {
+            childPID = pid
+            masterFD = master
+            close(slave)
+            let flags = fcntl(masterFD, F_GETFL)
+            _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
+        }
+
+        for ptr in cArgs where ptr != nil { free(ptr) }
+        for ptr in cEnv where ptr != nil { free(ptr) }
         
         if spawnResult != 0 {
             fatalError("posix_spawn failed: \(spawnResult)")
         }
-        childPID = pid
-        // Close descriptors not needed in parent
-        close(slave)
-            // ---------- Parent process ----------
-            masterFD = master
-
-            // Make master non‑blocking
-            let flags = fcntl(masterFD, F_GETFL)
-            _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
-
-            // Don't start reading here - wait for startReading() to be called
-            // This ensures onOutput handler is set before we start reading
-            // Free duplicated C strings allocated with strdup
-            for ptr in cArgs where ptr != nil {
-                free(ptr)
-            }
-            for ptr in cEnv where ptr != nil {
-                free(ptr)
-            }
-    
     }
 
-    // MARK: - Private state
-    internal var masterFD: Int32 = -1
-    internal var childPID: pid_t = 0
-    private var readSource: DispatchSourceRead?
-
-    // MARK: - Reading
-    private func beginReading() {
-        guard masterFD != -1 else {
-            return
+    /// Shell-style init
+    public init(shellPath: String, command: String? = nil, rows: Int, columns: Int, cwd: URL, env: [String: String]? = nil) throws {
+        var master: Int32 = -1
+        master = posix_openpt(O_RDWR)
+        guard master != -1 else { throw NSError(domain: "PTYWrapper", code: 1) }
+        grantpt(master)
+        unlockpt(master)
+        
+        guard let slaveNameC = ptsname(master) else { throw NSError(domain: "PTYWrapper", code: 4) }
+        let slavePath = String(cString: slaveNameC)
+        let slave = open(slavePath, O_RDWR)
+        
+        var ws = winsize()
+        ws.ws_row = UInt16(rows)
+        ws.ws_col = UInt16(columns)
+        _ = ioctl(slave, TIOCSWINSZ, &ws)
+        
+        var pid: pid_t = 0
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_adddup2(&fileActions, slave, STDIN_FILENO)
+        posix_spawn_file_actions_adddup2(&fileActions, slave, STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(&fileActions, slave, STDERR_FILENO)
+        posix_spawn_file_actions_addclose(&fileActions, master)
+        
+        var cArgs: [UnsafeMutablePointer<CChar>?] = []
+        cArgs.append(strdup(shellPath))
+        if let cmd = command {
+            cArgs.append(strdup("-l"))
+            cArgs.append(strdup("-c"))
+            cArgs.append(strdup(cmd))
+        } else {
+            cArgs.append(strdup("-l"))
         }
-        // Cancel any existing read source to avoid duplicates
-        readSource?.cancel()
-        readSource = nil
+        cArgs.append(nil)
         
+        let userHome = ProcessContext.homePath
+        let opencodePath = "\(userHome)/.opencode/bin"
+        var envVars = env ?? ProcessInfo.processInfo.environment
+        envVars["TERM"] = envVars["TERM"] ?? "xterm-256color"
+        let existingPath = envVars["PATH"] ?? ""
+        if !existingPath.contains(opencodePath) {
+            envVars["PATH"] = "\(opencodePath):/opt/homebrew/bin:/opt/homebrew/sbin:\(existingPath)"
+        }
+        envVars["PWD"] = cwd.path
         
+        var cEnv: [UnsafeMutablePointer<CChar>?] = []
+        for (k, v) in envVars {
+            cEnv.append(strdup("\(k)=\(v)"))
+        }
+        cEnv.append(nil)
+        
+        var attr: posix_spawnattr_t? = nil
+        posix_spawnattr_init(&attr)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+        
+        let spawnResult = posix_spawn(&pid, shellPath, &fileActions, &attr, cArgs, cEnv)
+        posix_spawnattr_destroy(&attr)
+        posix_spawn_file_actions_destroy(&fileActions)
+        
+        for ptr in cArgs where ptr != nil { free(ptr) }
+        for ptr in cEnv where ptr != nil { free(ptr) }
+
+        if spawnResult == 0 {
+            childPID = pid
+            masterFD = master
+            close(slave)
+            let flags = fcntl(masterFD, F_GETFL)
+            _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
+        } else {
+            throw NSError(domain: "PTYWrapper", code: Int(spawnResult))
+        }
+    }
+
+    /// Read/Write
+    func startReading(_ handler: @escaping (String) -> Void) {
+        self.onOutput = handler
+        guard masterFD != -1 else { return }
         let queue = DispatchQueue(label: "com.proterm.pty.read")
         readSource = DispatchSource.makeReadSource(fileDescriptor: masterFD, queue: queue)
         readSource?.setEventHandler { [weak self] in
             guard let self = self else { return }
-            var buffer = [UInt8](repeating: 0, count: 4096)
+            var buffer = [UInt8](repeating: 0, count: 8192)
             let bytes = read(self.masterFD, &buffer, buffer.count)
             if bytes > 0 {
-                let data = Data(buffer[0..<bytes])
-                if let str = String(data: data, encoding: .utf8) {
+                let chunkData = Data(buffer[0..<bytes])
+                var combined = self.utf8Remainder
+                combined.append(chunkData)
+                if let str = String(data: combined, encoding: .utf8) {
                     self.onOutput?(str)
+                    self.utf8Remainder = Data()
                 } else {
+                    self.utf8Remainder = combined
                 }
             } else if bytes == 0 {
-                // EOF – child exited
+                self.onExit?()
                 self.stop()
-            } else {
-                // Error reading
-            }
-        }
-        readSource?.setCancelHandler { [weak self] in
-            if let fd = self?.masterFD, fd != -1 {
-                close(fd)
             }
         }
         readSource?.resume()
     }
-
-    // MARK: - Public I/O
-    /// Write a string to the PTY (e.g. user keystrokes).
-    /// Public method to start reading PTY output with a handler.
-    public func startReading(_ handler: @escaping (String) -> Void) {
-        // Assign the closure to be called on each output chunk.
-        self.onOutput = handler
-        // Begin the internal read loop.
-        beginReading()
-    }
     
     func write(_ string: String) {
-        guard masterFD != -1 else {
-            return
-        }
-        if let data = string.data(using: .utf8) {
-            _ = data.withUnsafeBytes { ptr in
-                Darwin.write(masterFD, ptr.baseAddress!, data.count)
-            }
-        } else {
+        guard masterFD != -1, let data = string.data(using: .utf8) else { return }
+        _ = data.withUnsafeBytes { ptr in
+            Darwin.write(masterFD, ptr.baseAddress!, data.count)
         }
     }
 
-    // MARK: - Cleanup
-    /// Terminate the child process and close file descriptors.
+    func setWindowSize(rows: Int, columns: Int) {
+        guard masterFD != -1 else { return }
+        var ws = winsize()
+        ws.ws_row = UInt16(rows)
+        ws.ws_col = UInt16(columns)
+        _ = ioctl(masterFD, TIOCSWINSZ, &ws)
+        if childPID > 0 { kill(childPID, SIGWINCH) }
+    }
+
+    func sendSignal(_ signal: Int32) {
+        if childPID > 0 { kill(childPID, signal) }
+    }
+
     func stop() {
-        if let src = readSource {
-            src.cancel()
-            readSource = nil
-        }
+        readSource?.cancel()
+        readSource = nil
         if childPID > 0 {
             kill(childPID, SIGTERM)
             _ = waitpid(childPID, nil, 0)
+            childPID = 0
         }
         if masterFD != -1 {
             close(masterFD)
@@ -234,106 +250,9 @@ final class PTYWrapper: @unchecked Sendable {
         }
     }
 
-    public init(shellPath: String, command: String, rows: Int, columns: Int, cwd: URL) throws {
-        // 1️⃣ Create master PTY
-        var master: Int32 = -1
-        master = posix_openpt(O_RDWR)
-        guard master != -1 else { throw NSError(domain: "PTYWrapper", code: 1, userInfo: [NSLocalizedDescriptionKey: "posix_openpt failed"]) }
-        
-        // 2️⃣ Grant and unlock the slave side
-        guard grantpt(master) == 0 else { throw NSError(domain: "PTYWrapper", code: 2, userInfo: [NSLocalizedDescriptionKey: "grantpt failed"]) }
-        guard unlockpt(master) == 0 else { throw NSError(domain: "PTYWrapper", code: 3, userInfo: [NSLocalizedDescriptionKey: "unlockpt failed"]) }
-        
-        // 3️⃣ Obtain slave device name
-        guard let slaveNameC = ptsname(master) else { throw NSError(domain: "PTYWrapper", code: 4, userInfo: [NSLocalizedDescriptionKey: "ptsname failed"]) }
-        let slavePath = String(cString: slaveNameC)
-        
-        // 4️⃣ Open the slave side
-        let slave = open(slavePath, O_RDWR)
-        guard slave != -1 else { throw NSError(domain: "PTYWrapper", code: 5, userInfo: [NSLocalizedDescriptionKey: "open slave failed"]) }
-        
-        // 4.5️⃣ Set window size on slave before spawning
-        var ws = winsize()
-        ws.ws_row = UInt16(rows)
-        ws.ws_col = UInt16(columns)
-        ws.ws_xpixel = 0
-        ws.ws_ypixel = 0
-        _ = ioctl(slave, TIOCSWINSZ, &ws)
-        
-        // 5️⃣ Spawn the process using posix_spawn
-        var pid: pid_t = 0
-        var fileActions: posix_spawn_file_actions_t? = nil
-        posix_spawn_file_actions_init(&fileActions)
-        // Duplicate slave to stdio
-        posix_spawn_file_actions_adddup2(&fileActions, slave, STDIN_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, slave, STDOUT_FILENO)
-        posix_spawn_file_actions_adddup2(&fileActions, slave, STDERR_FILENO)
-        // Close master in child
-        posix_spawn_file_actions_addclose(&fileActions, master)
-        
-        // Build C‑style argv array for the shell
-        var cArgs: [UnsafeMutablePointer<CChar>?] = []
-        cArgs.append(strdup(shellPath))
-        cArgs.append(strdup("-l"))
-        cArgs.append(strdup("-c"))
-        cArgs.append(strdup(command))
-        cArgs.append(nil)
-        
-        // Build environment - inherit current environment and ensure critical variables are set
-        var envVars = ProcessInfo.processInfo.environment
-        envVars["TERM"] = envVars["TERM"] ?? "xterm-256color"
-        
-        // Ensure PATH includes Homebrew locations
-        if let existingPath = envVars["PATH"] {
-            if !existingPath.contains("/opt/homebrew") {
-                envVars["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:\(existingPath)"
-            }
-        } else {
-            envVars["PATH"] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        }
-        
-        // Set HOME if not already set
-        if envVars["HOME"] == nil {
-            envVars["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
-        }
-        
-        // Set working directory in environment
-        envVars["PWD"] = cwd.path
-        
-        // Build C-style environment array
-        var cEnv: [UnsafeMutablePointer<CChar>?] = []
-        for (k, v) in envVars {
-            cEnv.append(strdup("\(k)=\(v)"))
-        }
-        cEnv.append(nil)
-        
-        // Spawn with environment
-        let spawnResult = posix_spawn(&pid, shellPath, &fileActions, nil, cArgs, cEnv)
-        if spawnResult != 0 {
-            throw NSError(domain: "PTYWrapper", code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: "posix_spawn failed"])
-        }
-        
-        // Clean up C strings
-        for ptr in cArgs where ptr != nil {
-            free(ptr)
-        }
-        for ptr in cEnv where ptr != nil {
-            free(ptr)
-        }
-        
-        childPID = pid
-        // Close descriptors not needed in parent
-        close(slave)
-        masterFD = master
-        
-        // Make master non‑blocking
-        let flags = fcntl(masterFD, F_GETFL)
-        _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
-        
-        // Don't start reading here - wait for startReading() to be called
-        // This ensures onOutput handler is set before we start reading
-    }
-    deinit {
-        stop()
-    }
+    deinit { stop() }
+}
+
+struct ProcessContext {
+    static var homePath: String { NSHomeDirectory() }
 }

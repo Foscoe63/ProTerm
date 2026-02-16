@@ -366,30 +366,22 @@ struct TerminalView: View {
       }
       .onTapGesture {}
       .onAppear {
-        recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: lineNumbersWidth)
+        recalculateTerminalSize(totalWidth: geo.size.width, totalHeight: geo.size.height, lineNumberWidth: lineNumbersWidth)
       }
-      .onChange(of: geo.size.width) { _, newWidth in
-        recalculateTerminalWidth(totalWidth: newWidth, lineNumberWidth: lineNumbersWidth)
+      .onChange(of: geo.size) { _, newSize in
+        recalculateTerminalSize(totalWidth: newSize.width, totalHeight: newSize.height, lineNumberWidth: lineNumbersWidth)
       }
       .onChange(of: visualSettings.showLineNumbers) { _, _ in
         let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
-        recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+        recalculateTerminalSize(totalWidth: geo.size.width, totalHeight: geo.size.height, lineNumberWidth: newLineNumbersWidth)
       }
       .onChange(of: themeManager.activeProfileID) { _, _ in
         let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
-        recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
-      }
-      .onChange(of: themeManager.activeProfile.horizontalPadding) { _, _ in
-        let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
-        recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+        recalculateTerminalSize(totalWidth: geo.size.width, totalHeight: geo.size.height, lineNumberWidth: newLineNumbersWidth)
       }
       .onChange(of: fontManager.fontSize) { _, _ in
         let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
-        recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
-      }
-      .onChange(of: fontManager.fontName) { _, _ in
-        let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
-        recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+        recalculateTerminalSize(totalWidth: geo.size.width, totalHeight: geo.size.height, lineNumberWidth: newLineNumbersWidth)
       }
     }
   }
@@ -410,11 +402,15 @@ struct TerminalView: View {
     }
   }
 
-  private func recalculateTerminalWidth(totalWidth: CGFloat, lineNumberWidth: CGFloat) {
-    let padding = CGFloat(themeManager.activeProfile.horizontalPadding * 2)
-    let width = max(40, totalWidth - lineNumberWidth - padding)
+  private func recalculateTerminalSize(totalWidth: CGFloat, totalHeight: CGFloat, lineNumberWidth: CGFloat) {
+    let horizontalPadding = CGFloat(themeManager.activeProfile.horizontalPadding * 2)
+    let verticalPadding = CGFloat(themeManager.activeProfile.verticalPadding * 2)
+    let width = max(40, totalWidth - lineNumberWidth - horizontalPadding)
+    let height = max(40, totalHeight - verticalPadding)
     session.characterWidth = fontManager.characterCellSize.width
+    session.characterHeight = fontManager.characterCellSize.height
     session.terminalWidth = width
+    session.terminalHeight = height
   }
 
   // MARK: - Scroll Content

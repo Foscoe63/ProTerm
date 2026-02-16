@@ -7,7 +7,7 @@ struct ANSIParser {
     
     /// Parse ANSI escape codes and return attributed text
     static func parse(_ text: String, baseFont: Font = .custom("Menlo", size: 12)) -> AttributedString {
-        let (normalized, _) = normalizeControlCharacters(text)
+        let (normalized, _, _) = normalizeControlCharacters(text)
         var attributedString = AttributedString()
         var currentAttributes = AttributeContainer()
         currentAttributes.font = baseFont
@@ -115,11 +115,12 @@ struct ANSIParser {
         }
     }
     
-    static func normalizeControlCharacters(_ text: String, pendingCR: Bool = false) -> (String, Bool) {
+    static func normalizeControlCharacters(_ text: String, pendingCR: Bool = false) -> (normalized: String, isCRPending: Bool, remainder: String) {
         var buffer = String()
         buffer.reserveCapacity(text.count)
         var i = text.startIndex
         var isCRPending = pendingCR
+        var lineCursor = 0 // Track cursor position in the current line
         
         while i < text.endIndex {
             let ch = text[i]
@@ -127,42 +128,176 @@ struct ANSIParser {
             if ch == "\r" {
                 let nextIndex = text.index(after: i)
                 if nextIndex < text.endIndex, text[nextIndex] == "\n" {
-                    // Standard CRLF -> LF
                     buffer.append("\n")
+                    lineCursor = 0
                     isCRPending = false
                     i = text.index(after: nextIndex)
                     continue
                 }
-                // Standalone CR: in log-mode, treat as a newline to avoid overwriting content
+                lineCursor = 0
                 isCRPending = true
                 i = text.index(after: i)
                 continue
             } else if ch == "\n" {
                 buffer.append("\n")
+                lineCursor = 0
                 isCRPending = false
                 i = text.index(after: i)
-            } else if ch == "\u{0008}" { // backspace
-                // In log-mode, we try to support simple backspaces but don't delete newlines
-                if !buffer.isEmpty, buffer.last != "\n" {
-                    buffer.removeLast()
+            } else if ch == "\u{001B}" {
+                let next = text.index(after: i)
+                if next == text.endIndex {
+                    // ESC at the very end
+                    return (buffer, isCRPending, String(text[i...]))
                 }
+                
+                if text[next] == "[" {
+                    if let result = ANSIParser.readCSISequence(in: text, start: next) {
+                        let sequence = String(text[i...result.endIndex])
+                        i = text.index(after: result.endIndex)
+                        
+                        if result.finalChar == "m" {
+                            // SGR (Color/Style): Pass through to buffer, don't move cursor
+                            buffer.append(sequence)
+                        } else if result.finalChar == "G" {
+                            // CHA: Move to column
+                            let col = Int(result.parameters) ?? 1
+                            lineCursor = max(0, col - 1)
+                        } else if result.finalChar == "K" {
+                            // EL: Erase in line
+                            let mode = Int(result.parameters) ?? 0
+                            handleCSI_K(mode, &buffer, lineCursor)
+                        } else if result.finalChar == "H" || result.finalChar == "f" {
+                            // CUP/HVP: Move to Row;Col
+                            let parts = result.parameters.split(separator: ";")
+                            if let rStr = parts.first, let r = Int(rStr) {
+                                // Simple row simulation: pad with newlines if jumping down
+                                let currentRows = buffer.filter { $0 == "\n" }.count
+                                if r - 1 > currentRows {
+                                    buffer.append(contentsOf: String(repeating: "\n", count: (r - 1) - currentRows))
+                                }
+                            }
+                            lineCursor = 0
+                            if parts.count >= 2 {
+                                let cParams = parts[1].trimmingCharacters(in: CharacterSet.letters)
+                                if let c = Int(cParams) {
+                                    lineCursor = max(0, c - 1)
+                                }
+                            }
+                        }
+                        continue
+                    } else {
+                        // Incomplete CSI sequence at the end of chunk
+                        return (buffer, isCRPending, String(text[i...]))
+                    }
+                }
+                // If it's a stand-alone ESC or unknown, skip it
                 i = text.index(after: i)
-            } else if ch == "\u{000C}" { // form feed
-                buffer.append("\n\n-- Page Break --\n\n")
-                isCRPending = false
-                i = text.index(after: i)
-            } else if ch == "\u{0007}" { // bell
+                continue
+            } else if ch == "\u{0008}" { // backspace
+                lineCursor = max(0, lineCursor - 1)
                 i = text.index(after: i)
             } else {
                 if isCRPending {
-                    buffer.append("\n")
+                    // Overwrite logic: if we were at start of line, clear it first for simple log-mode compatibility
+                    if lineCursor == 0 { ANSIParser.clearCurrentLine(&buffer) }
                     isCRPending = false
                 }
-                buffer.append(ch)
+                
+                // For a real string-based terminal, we overwrite at lineCursor
+                // But for log-mode, we just append IF lineCursor is at end
+                appendAtCursor(&buffer, ch, &lineCursor)
                 i = text.index(after: i)
             }
         }
-        return (buffer, isCRPending)
+        return (buffer, isCRPending, "")
+    }
+
+    private static func appendAtCursor(_ buffer: inout String, _ ch: Character, _ cursor: inout Int) {
+        let lastNewline = buffer.lastIndex(of: "\n")
+        let lineStart = (lastNewline == nil) ? buffer.startIndex : buffer.index(after: lastNewline!)
+        _ = buffer[lineStart...]
+        
+        let targetIdx = indexForVisualColumn(lineStart, cursor, in: buffer)
+        
+        if targetIdx >= buffer.endIndex {
+            if cursor > 0 {
+                // Approximate distance check (not perfect due to ANSI, but better than nothing)
+                let currentVisualCount = visualLength(of: buffer[lineStart...])
+                if cursor > currentVisualCount {
+                    buffer.append(contentsOf: String(repeating: " ", count: cursor - currentVisualCount))
+                }
+            }
+            buffer.append(ch)
+        } else {
+            buffer.replaceSubrange(targetIdx...targetIdx, with: String(ch))
+        }
+        cursor += 1
+    }
+
+    private static func visualLength(of segment: Substring) -> Int {
+        var count = 0
+        var i = segment.startIndex
+        while i < segment.endIndex {
+            if segment[i] == "\u{001B}" {
+                let next = segment.index(after: i)
+                if next < segment.endIndex, segment[next] == "[" {
+                    if let result = readCSISequence(in: String(segment), start: next) {
+                        i = segment.index(after: result.endIndex)
+                        continue
+                    }
+                }
+            }
+            count += 1
+            i = segment.index(after: i)
+        }
+        return count
+    }
+
+    private static func indexForVisualColumn(_ lineStart: String.Index, _ column: Int, in buffer: String) -> String.Index {
+        var pos = 0
+        var current = lineStart
+        
+        while current < buffer.endIndex {
+            // First, skip any ANSI sequences at this location
+            if buffer[current] == "\u{001B}" {
+                let next = buffer.index(after: current)
+                if next < buffer.endIndex, buffer[next] == "[" {
+                    if let result = readCSISequence(in: buffer, start: next) {
+                        current = buffer.index(after: result.endIndex)
+                        continue
+                    }
+                }
+            }
+            
+            // If we've reached the desired visual column, stop
+            if pos >= column {
+                break
+            }
+            
+            current = buffer.index(after: current)
+            pos += 1
+        }
+        return current
+    }
+
+    private static func handleCSI_K(_ mode: Int, _ buffer: inout String, _ cursor: Int) {
+        let lastNewline = buffer.lastIndex(of: "\n")
+        let lineStart = (lastNewline == nil) ? buffer.startIndex : buffer.index(after: lastNewline!)
+
+        if mode == 0 { // Clear from cursor to end
+            let targetIdx = indexForVisualColumn(lineStart, cursor, in: buffer)
+            if targetIdx < buffer.endIndex {
+                buffer.removeSubrange(targetIdx..<buffer.endIndex)
+            }
+        } else if mode == 1 { // Clear from start to cursor
+            let targetIdx = indexForVisualColumn(lineStart, cursor, in: buffer)
+            // Replace visual characters with spaces up to cursor
+            // This is complex - for now just leave as is or clear entire line
+            buffer.removeSubrange(lineStart..<targetIdx)
+            buffer.insert(contentsOf: String(repeating: " ", count: cursor), at: lineStart)
+        } else if mode == 2 { // Clear entire line
+            buffer.removeSubrange(lineStart..<buffer.endIndex)
+        }
     }
     
     private static func clearCurrentLine(_ buffer: inout String) {

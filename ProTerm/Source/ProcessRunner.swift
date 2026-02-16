@@ -4,9 +4,9 @@ import Foundation
 /// and streaming their output incrementally.
 final class ProcessRunner {
     struct Run {
-        fileprivate let process: Process
-        fileprivate let readHandle: FileHandle
-        fileprivate let pipe: Pipe
+        let process: Process
+        let readHandle: FileHandle
+        let pipe: Pipe
 
         /// Attempts to terminate the running process gracefully.
         func stop() {

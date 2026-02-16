@@ -92,57 +92,32 @@ final class SSHSessionManager: @unchecked Sendable {
     }
 
 
-    let handler = PTYWrapper(command: execPath, args: args, env: sshEnv)
-
-
     // Get session ID for use in closures (avoid capturing session object)
-    let sessionId = session.id
+    _ = session.id
 
-    // Attach the PTY to the session (stores master FD, child PID, etc.).
+    let process = PTYProcess()
+    process.start(command: execPath, args: args, env: sshEnv)
+
+    // Attach the process to the session.
     // Must call on main actor since attachPTY is @MainActor
-    // PTYWrapper is now @unchecked Sendable, so passing it is safe
-    // isSSH=true completely disables IO features for SSH sessions
+    // PTYProcess is @unchecked Sendable, so passing it is safe
 
     // Use a semaphore to wait for main-thread setup completion
     let semaphore = DispatchSemaphore(value: 0)
 
     DispatchQueue.main.async {
-      session.attachPTY(handler, isSSH: true)
-
-      handler.startReading { [sessionId] text in
-        DispatchQueue.main.async {
-          NotificationCenter.default.post(
-            name: .sshPTYOutput, object: sessionId, userInfo: ["text": text])
-        }
-      }
-
+      session.attachPTY(process, isSSH: true)
       semaphore.signal()
     }
 
     // Wait for setup to complete (with short timeout)
     _ = semaphore.wait(timeout: .now() + 1.0)
 
-
-    // Monitor child exit – post a notification for the session so the
-    // session can perform cleanup on the main actor. Avoid capturing
-    // `session` or `handler` into this background handler.
-    let monitor = DispatchSource.makeProcessSource(
-      identifier: handler.childPID,
-      eventMask: .exit,
-      queue: DispatchQueue.global(qos: .userInitiated))
-    monitor.setEventHandler {
-      DispatchQueue.main.async {
-        NotificationCenter.default.post(name: .sshPTYExit, object: sessionId)
-      }
-    }
-    monitor.resume()
-
     // Verify the SSH process is still running after initialization
     // Give it a brief moment to fail if there's an immediate error
     usleep(100_000)  // 100ms
 
-    if !handler.isRunning {
-      monitor.cancel()
+    if !process.isRunning {
       return .failure(
         .launchFailed(
           NSError(
