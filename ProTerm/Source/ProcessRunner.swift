@@ -39,7 +39,9 @@ final class ProcessRunner {
     ) -> Run? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: shellPath)
-        proc.arguments = ["-l", "-c", command]
+        // Use -l (login), -i (interactive), -c (command) to ensure full environment loading
+        // This makes the shell source .zprofile, .zshrc (for zsh) or .bash_profile, .bashrc (for bash)
+        proc.arguments = ["-l", "-i", "-c", command]
         proc.currentDirectoryURL = cwd
 
         var env = ProcessInfo.processInfo.environment
@@ -51,6 +53,24 @@ final class ProcessRunner {
         env["LSCOLORS"] = env["LSCOLORS"] ?? "Gxfxcxdxbxegedabagacad"
         env["GIT_PAGER"] = "cat"
         env["GIT_CONFIG_PARAMETERS"] = "'color.ui=always'"
+        
+        // Explicitly set HOME to ensure shell profile loading works correctly
+        if env["HOME"] == nil {
+            env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
+        }
+        
+        // Ensure USER and LOGNAME are set for proper shell initialization
+        let username = NSUserName()
+        if env["USER"] == nil {
+            env["USER"] = username
+        }
+        if env["LOGNAME"] == nil {
+            env["LOGNAME"] = username
+        }
+        
+        // Set SHELL to the selected shell path for consistency
+        env["SHELL"] = shellPath
+        
         proc.environment = env
 
         let pipe = Pipe()

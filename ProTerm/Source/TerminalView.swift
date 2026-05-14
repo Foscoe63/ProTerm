@@ -30,6 +30,7 @@ struct TerminalView: View {
   @State private var cachedLines: [AttributedString] = []
   @State private var lastProcessedOutput: String = ""
   @State private var hasPendingBracketedPaste = false
+  @State private var inputAreaHeight: CGFloat = 0  // measured command input height
 
   @EnvironmentObject private var themeManager: ThemeManager
   @EnvironmentObject private var fontManager: FontManager
@@ -364,12 +365,31 @@ struct TerminalView: View {
           )
         }
       }
+      .contextMenu {
+        Button("Copy") {
+          #if os(macOS)
+          NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+          #endif
+        }
+        Button("Paste") {
+          #if os(macOS)
+          NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
+          #endif
+        }
+      }
       .onTapGesture {}
       .onAppear {
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: lineNumbersWidth)
+        // Defer the initial height calculation one runloop to allow layout to settle
+        DispatchQueue.main.async {
+          recalculateTerminalHeight(totalHeight: geo.size.height)
+        }
       }
       .onChange(of: geo.size.width) { _, newWidth in
         recalculateTerminalWidth(totalWidth: newWidth, lineNumberWidth: lineNumbersWidth)
+      }
+      .onChange(of: geo.size.height) { _, newHeight in
+        recalculateTerminalHeight(totalHeight: newHeight)
       }
       .onChange(of: visualSettings.showLineNumbers) { _, _ in
         let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
@@ -378,18 +398,24 @@ struct TerminalView: View {
       .onChange(of: themeManager.activeProfileID) { _, _ in
         let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+        recalculateTerminalHeight(totalHeight: geo.size.height)
       }
       .onChange(of: themeManager.activeProfile.horizontalPadding) { _, _ in
         let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
       }
+      .onChange(of: themeManager.activeProfile.verticalPadding) { _, _ in
+        recalculateTerminalHeight(totalHeight: geo.size.height)
+      }
       .onChange(of: fontManager.fontSize) { _, _ in
         let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+        recalculateTerminalHeight(totalHeight: geo.size.height)
       }
       .onChange(of: fontManager.fontName) { _, _ in
         let newLineNumbersWidth = visualSettings.showLineNumbers ? 40.0 : 0.0
         recalculateTerminalWidth(totalWidth: geo.size.width, lineNumberWidth: newLineNumbersWidth)
+        recalculateTerminalHeight(totalHeight: geo.size.height)
       }
     }
   }
@@ -413,8 +439,30 @@ struct TerminalView: View {
   private func recalculateTerminalWidth(totalWidth: CGFloat, lineNumberWidth: CGFloat) {
     let padding = CGFloat(themeManager.activeProfile.horizontalPadding * 2)
     let width = max(40, totalWidth - lineNumberWidth - padding)
-    session.characterWidth = fontManager.characterCellSize.width
-    session.terminalWidth = width
+    // Guard against redundant writes within the same frame and coalesce on next runloop
+    let charWidth = fontManager.characterCellSize.width
+    let needsUpdate = abs(Double(session.terminalWidth - width)) > 0.5 || abs(Double(session.characterWidth - charWidth)) > 0.1
+    guard needsUpdate else { return }
+    DispatchQueue.main.async {
+      session.characterWidth = charWidth
+      session.terminalWidth = width
+    }
+  }
+
+  private func recalculateTerminalHeight(totalHeight: CGFloat) {
+    // Subtract vertical padding to get actual drawable terminal height
+    let padding = CGFloat(themeManager.activeProfile.verticalPadding * 2)
+    // Also subtract the command input area's measured height so rows reflect the TUI region only
+    let height = max(40, totalHeight - padding - inputAreaHeight)
+    // Use current font metrics for line height
+    let newLineHeight = fontManager.characterCellSize.height
+    // Avoid spamming updates; only push when values actually change
+    let needsUpdate = abs(Double(session.terminalHeight - height)) > 0.5 || abs(Double(session.lineHeight - newLineHeight)) > 0.1
+    guard needsUpdate else { return }
+    DispatchQueue.main.async {
+      session.lineHeight = newLineHeight
+      session.terminalHeight = height
+    }
   }
 
   // MARK: - Scroll Content
@@ -475,6 +523,17 @@ struct TerminalView: View {
           outputLineWithNumbers(availableWidth: availableWidth)
             .frame(maxWidth: .infinity, alignment: .leading)
           commandInputArea
+            .background(
+              GeometryReader { g in
+                Color.clear
+                  .onAppear { inputAreaHeight = g.size.height }
+                  .onChange(of: g.size.height) { _, newH in
+                    // Update and push new rows when the input bar height changes (wrapping, font size, etc.)
+                    inputAreaHeight = newH
+                    recalculateTerminalHeight(totalHeight: geo.size.height)
+                  }
+              }
+            )
           Color.clear.frame(height: 1).id("BOTTOM")
             .onAppear {
               terminalManager.scrollPositions[session.id] = 1.0
@@ -1211,11 +1270,13 @@ struct TerminalView: View {
   private var shouldUseVirtualScrolling: Bool {
     // Use cached lines count if available for better performance
     if !cachedLines.isEmpty {
-      return cachedLines.count > 5
+      // Use virtual scrolling only for very large outputs to preserve multi-line selection
+      return cachedLines.count > 500
     }
     let outputLines = session.output.components(separatedBy: .newlines).count
     // Use virtual scrolling for most outputs to ensure performance and proper scroll tracking
-    return outputLines > 5
+    // Increase threshold so normal-sized outputs remain a single selectable Text (better copy UX)
+    return outputLines > 500
   }
 
   // Virtual scrolled output - splits into lines for LazyVStack
@@ -1240,6 +1301,7 @@ struct TerminalView: View {
         Text(line)
           .frame(width: textWidth, alignment: .leading)
           .fixedSize(horizontal: false, vertical: true)
+          .textSelection(.enabled)
           .padding(.leading, visualSettings.showLineNumbers ? 0 : 10)
           .padding(.trailing, 0)
           .font(fontManager.font)

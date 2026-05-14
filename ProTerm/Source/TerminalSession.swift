@@ -70,6 +70,30 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     }
   }
 
+  // Terminal height and line height to compute rows
+  var terminalHeight: CGFloat = 600 {
+    didSet {
+      updateRows()
+      applyTTYSettingsIfNeeded()
+    }
+  }
+
+  var lineHeight: CGFloat = 16.0 {
+    didSet {
+      updateRows()
+      applyTTYSettingsIfNeeded()
+    }
+  }
+
+  private func updateRows() {
+    // Calculate rows based on terminal height and line height
+    let availableHeight = max(120, terminalHeight) // Minimum 120 points
+    let lh = max(8.0, lineHeight)                  // Avoid division by zero and tiny lines
+    let calculatedRows = Int(availableHeight / lh)
+    // Clamp to a reasonable terminal range
+    self.rows = max(12, min(200, calculatedRows))
+  }
+
   private var columns: Int = 80
 
   // Strong references for running process and I/O to ensure handlers fire
@@ -88,7 +112,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   private var oscSequenceRemainder = ""
   private var isShuttingDown: Bool = false
   // Child PID for forkpty-based interactive sessions
-  private var childPID: pid_t = 0
+  var childPID: pid_t = 0  // Made internal for interrupt checking
   private var childExitSource: DispatchSourceProcess?
 
   // Thread-safe shutdown flag for PTY readers
@@ -97,7 +121,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   // Cached rows estimate (height). We don’t track actual pixel height here,
   // use a sensible default; can be exposed later for dynamic sizing
-  private var rows: Int = 24
+  private var rows: Int = 40
 
   private var bracketedPasteEnabled: Bool
   private var mouseReportingEnabled: Bool
@@ -106,6 +130,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   private var externalPTYOutputObserver: NSObjectProtocol?
   private var externalPTYExitObserver: NSObjectProtocol?
   private var pendingCR = false // Track for cross-chunk Carriage Return handling
+  private var didPostAttachWinch = false // One-shot guard for post-attach TTY size push
+  private var isInAltScreen = false // Track alternate screen buffer state for TUIs
 
   private enum IOSettingKey {
     static let bracketed = "ProTermBracketedPaste"
@@ -174,6 +200,18 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     }
     if self.masterFD >= 0 {
       setWindowSize(fd: self.masterFD, cols: UInt16(columns), rows: UInt16(rows))
+    }
+  }
+
+  // Ensure the child process sees the final window size after PTY attach/first output
+  @MainActor
+  private func postAttachWinchIfNeeded() {
+    guard !didPostAttachWinch else { return }
+    didPostAttachWinch = true
+    if masterFD >= 0 {
+      setWindowSize(fd: masterFD, cols: UInt16(columns), rows: UInt16(rows))
+    } else if slaveFD >= 0 {
+      setWindowSize(fd: slaveFD, cols: UInt16(columns), rows: UInt16(rows))
     }
   }
 
@@ -282,7 +320,10 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // Prepare main-thread append closure
     let appendOnMain: (String) -> Void = { [weak self] s in
       Task { @MainActor [weak self] in
-        self?.handleOutputChunkOnMain(s)
+        guard let strongSelf = self else { return }
+        // On first visible output, ensure the child sees the final window size
+        strongSelf.postAttachWinchIfNeeded()
+        strongSelf.handleOutputChunkOnMain(s)
       }
     }
 
@@ -391,6 +432,14 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     _ = tcsetattr(fd, TCSAFLUSH, &tio)
   }
 
+  // Force apply window size and basic env to the child’s session FDs
+  @MainActor
+  private func forceApplyTTYSizeAndEnv() {
+    // Push to both ends if available
+    if masterFD >= 0 { setWindowSize(fd: masterFD, cols: UInt16(columns), rows: UInt16(rows)) }
+    if slaveFD >= 0 { setWindowSize(fd: slaveFD, cols: UInt16(columns), rows: UInt16(rows)) }
+  }
+
   var prompt: String {
     // For SSH sessions, don't show a local prompt - the remote server provides its own
     if isSSHSession {
@@ -454,6 +503,12 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // Initialize columns from UserDefaults preference (default: 80)
     let configuredColumns = defaults.object(forKey: "ProTermTerminalColumns") as? Int ?? 80
     self.columns = max(40, min(200, configuredColumns))  // Clamp to valid range
+
+    // Initialize rows from UserDefaults preference if present (default: 40)
+    if let configuredRows = defaults.object(forKey: "ProTermTerminalRows") as? Int {
+      self.rows = max(12, min(200, configuredRows))
+    }
+
     // Don't add prompt to output - it's shown inline in the input area
     output = ""
     ioSettingsObserver = NotificationCenter.default.addObserver(
@@ -507,7 +562,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         
         // Append chunk exactly as received - do NOT add local newlines between chunks
         // as it breaks character-at-a-time echoing in interactive sessions.
-        self.appendOutputChunk(text)
+        self.handleOutputChunkOnMain(text)
       }
     }
 
@@ -654,8 +709,21 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     }
 
     // Handle interactive commands with PTY (python, python3, node, ssh, etc.)
+    // Also include commands that need full environment PATH (npm, yarn, brew, etc.)
+    // Note: Some editor CLI tools (code, cursor) are NOT in this list because
+    // they just launch external apps and don't need PTY. We include "opencode" so it inherits the login-shell PATH.
     let interactiveCommands = [
       "python", "python3", "node", "irb", "ruby", "ghci", "ipython", "ssh",
+      "npm", "npx", "yarn", "pnpm", "bun",  // Node.js package managers
+      "pip", "pip3", "poetry", "pipenv",     // Python package managers  
+      "vim", "nvim", "nano", "emacs",        // Editors
+      "less", "more", "man",                  // Pagers
+      "htop", "top",                          // System monitors
+      "mysql", "psql", "mongo", "redis-cli", // Database CLIs
+      "docker", "kubectl",                    // Container tools
+      "git", "tig",                           // Git tools
+      "brew",                                 // Homebrew
+      "opencode",
     ]
     let commandName = trimmed.components(separatedBy: .whitespaces).first?.lowercased() ?? ""
     if interactiveCommands.contains(commandName) {
@@ -706,7 +774,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       command: commandToRun,
       cwd: cwd,
       columns: effectiveColumns,
-      rows: 24,
+      rows: self.rows,
       onOutput: { [weak self] chunk in
         Task { @MainActor [weak self] in
           guard let self = self else { return }
@@ -876,9 +944,17 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       
       // Start reading from PTY
       startPTYReadSource(masterFD: master)
+
+      // Allow one more size push after attach so fast-starting TUIs get final rows
+      didPostAttachWinch = false
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        Task { @MainActor [weak self] in
+          self?.postAttachWinchIfNeeded()
+        }
+      }
     } else {
       // Use PTY for other interactive commands via shell
-      runPTYCommandWithHelper(command)
+      runPTYCommandWithForkPTY(command)
     }
   }
 
@@ -888,8 +964,66 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   @MainActor
   private func runSudoCommand(_ command: String) {
-    // Use PTY for sudo with full terminal setup (needs helper for setsid)
-    runPTYCommandWithHelper(command)
+    // Sudo requires a real controlling terminal to read passwords
+    // Use the C helper proterm_forkpty_exec which properly sets up the controlling terminal
+    
+    let shellPath = currentShellPath()
+    
+    // Build arguments for shell execution
+    let args = [shellPath, "-l", "-i", "-c", command]
+    let cArgs = args.map { strdup($0) }
+    let argvPointers: [UnsafeMutablePointer<CChar>?] = cArgs.map { $0 } + [nil]
+    
+    // Build environment with proper terminal settings
+    var env = ProcessInfo.processInfo.environment
+    env["TERM"] = "xterm-256color"
+    env["COLUMNS"] = "\(columns)"
+    env["LINES"] = "\(rows)"
+    env["SHELL"] = shellPath
+    env["PWD"] = cwd.path
+    
+    let cEnvStrings = env.map { strdup("\($0.key)=\($0.value)") }
+    let envPointers: [UnsafeMutablePointer<CChar>?] = cEnvStrings.map { $0 } + [nil]
+    
+    var master: Int32 = -1
+    
+    let pid = argvPointers.withUnsafeBufferPointer { argvBuf in
+      envPointers.withUnsafeBufferPointer { envvBuf in
+        proterm_forkpty_exec(
+          shellPath,
+          UnsafeMutablePointer(mutating: argvBuf.baseAddress),
+          UnsafeMutablePointer(mutating: envvBuf.baseAddress),
+          &master,
+          UInt16(rows),
+          UInt16(columns)
+        )
+      }
+    }
+    
+    // Cleanup C strings
+    for ptr in cArgs { free(ptr) }
+    for ptr in cEnvStrings { free(ptr) }
+    
+    guard pid > 0, master >= 0 else {
+      appendOutputChunk("\nError: Failed to start sudo command\n")
+      return
+    }
+    
+    self.masterFD = master
+    self.childPID = pid
+    self.isProcessRunning = true
+    self.process = nil
+    
+    // Set non-blocking
+    setNonBlocking(master)
+    
+    // Monitor the child process
+    monitorChildProcess(pid: pid)
+    
+    // Start reading from PTY
+    startPTYReadSource(masterFD: master)
+    
+    // DO NOT configure IO features for sudo
   }
 
   @MainActor
@@ -906,6 +1040,14 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       self.ptyHandler = handler
       // Preserve old properties for compatibility with other parts of the code
       self.masterFD = handler.masterFD
+
+      // Configure PTY window size for proper TUI behavior
+      if self.masterFD >= 0 {
+        self.setWindowSize(fd: self.masterFD, cols: UInt16(self.columns), rows: UInt16(self.rows))
+        // Some TUIs read size before first output; immediately send another WINCH
+        self.forceApplyTTYSizeAndEnv()
+      }
+
       self.childPID = handler.childPID
       self.isProcessRunning = true
       self.process = nil  // Not using Foundation.Process in forkpty path
@@ -917,11 +1059,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       handler.startReading { [weak self] text in
         Task { @MainActor [weak self] in
           guard let strongSelf = self else { return }
-          var outputToAdd = text
-          if !strongSelf.output.hasSuffix("\n") && !strongSelf.output.isEmpty {
-            outputToAdd = "\n" + text
-          }
-          strongSelf.appendOutputChunk(outputToAdd)
+          strongSelf.postAttachWinchIfNeeded()
+          strongSelf.handleOutputChunkOnMain(text)
         }
       }
 
@@ -937,6 +1076,13 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         // Configure IO features immediately for non-SSH commands
         configureIOFeaturesForActivePTY()
       }
+      // Reset one-shot flag and schedule a size re-push shortly after attach
+      didPostAttachWinch = false
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        Task { @MainActor [weak self] in
+          self?.postAttachWinchIfNeeded()
+        }
+      }
     } catch {
       self.appendOutputChunk(
         "\nError: Failed to start PTY session: \(error.localizedDescription)\n")
@@ -945,27 +1091,144 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   @MainActor
   private func runPTYCommandWithHelper(_ command: String) {
+    // Use PTYWrapper for consistent environment handling
+    // This ensures commands run through a login shell (-l) which loads
+    // the user's full PATH and environment from .zshrc, .bash_profile, etc.
+    do {
+      let handler = try PTYWrapper(
+        shellPath: self.currentShellPath(),
+        command: command,
+        rows: self.rows,
+        columns: self.columns,
+        cwd: self.cwd
+      )
+      
+      // Keep reference for later use (e.g., sending input, termination)
+      self.ptyHandler = handler
+      self.masterFD = handler.masterFD
+
+      // Configure PTY window size for proper TUI behavior
+      if self.masterFD >= 0 {
+        self.setWindowSize(fd: self.masterFD, cols: UInt16(self.columns), rows: UInt16(self.rows))
+        self.forceApplyTTYSizeAndEnv()
+      }
+
+      self.childPID = handler.childPID
+      self.isProcessRunning = true
+      self.process = nil
+      
+      // Monitor the child process to detect when it exits
+      monitorChildProcess(pid: handler.childPID)
+      
+      // Start reading PTY output and forward it to the UI
+      handler.startReading { [weak self] text in
+        Task { @MainActor [weak self] in
+          guard let strongSelf = self else { return }
+          strongSelf.postAttachWinchIfNeeded()
+          strongSelf.handleOutputChunkOnMain(text)
+        }
+      }
+      
+      // Check if this is a command that should NOT have IO features
+      // Commands like sudo, mysql, psql, mongo, redis-cli, telnet, nc, netcat need raw terminal input
+      let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      let noIOFeatureCommands = ["sudo", "mysql", "psql", "mongo", "redis-cli", "telnet", "nc", "netcat"]
+      let shouldSkipIOFeatures = noIOFeatureCommands.contains { trimmed.hasPrefix($0) }
+      
+      if !shouldSkipIOFeatures {
+        // Configure IO features for this PTY session
+        configureIOFeaturesForActivePTY()
+      }
+
+      // Reset one-shot flag and schedule a size re-push shortly after attach
+      didPostAttachWinch = false
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        Task { @MainActor [weak self] in
+          self?.postAttachWinchIfNeeded()
+        }
+      }
+    } catch {
+      self.appendOutputChunk(
+        "\nError: Failed to start PTY session: \(error.localizedDescription)\n")
+    }
+  }
+
+  // New: Use forkpty-based helper to guarantee controlling TTY and non-zero window size
+  @MainActor
+  private func runPTYCommandWithForkPTY(_ command: String) {
     let shellPath = currentShellPath()
+    // Build arguments for a login interactive shell executing the command
+    // Keep command as-is; we’ll perform a single post-attach stty as a fallback
+    let args = [shellPath, "-l", "-i", "-c", command]
+    let cArgs = args.map { strdup($0) }
+    let argvPointers: [UnsafeMutablePointer<CChar>?] = cArgs.map { $0 } + [nil]
+
+    // Build environment with terminal settings
+    var env = ProcessInfo.processInfo.environment
+    env["TERM"] = env["TERM"] ?? "xterm-256color"
+    env["COLUMNS"] = "\(columns)"
+    env["LINES"] = "\(rows)"
+    env["SHELL"] = shellPath
+    env["PWD"] = cwd.path
+
+    let cEnvStrings = env.map { strdup("\($0.key)=\($0.value)") }
+    let envPointers: [UnsafeMutablePointer<CChar>?] = cEnvStrings.map { $0 } + [nil]
+
     var master: Int32 = -1
-    let pid = proterm_forkpty_spawn(shellPath, command, &master, UInt16(rows), UInt16(columns))
+
+    let pid = argvPointers.withUnsafeBufferPointer { argvBuf in
+      envPointers.withUnsafeBufferPointer { envvBuf in
+        proterm_forkpty_exec(
+          shellPath,
+          UnsafeMutablePointer(mutating: argvBuf.baseAddress),
+          UnsafeMutablePointer(mutating: envvBuf.baseAddress),
+          &master,
+          UInt16(rows),
+          UInt16(columns)
+        )
+      }
+    }
+
+    // Cleanup duplicated C strings
+    for ptr in cArgs { free(ptr) }
+    for ptr in cEnvStrings { free(ptr) }
+
     guard pid > 0, master >= 0 else {
-      self.appendOutputChunk("\nError: Failed to start PTY session\n")
+      appendOutputChunk("\nError: Failed to start interactive PTY session\n")
       return
     }
 
     self.masterFD = master
-    self.slaveFD = -1
     self.childPID = pid
-    self.ptyHandler = nil
-    self.process = nil
     self.isProcessRunning = true
+    self.process = nil
 
+    // Non-blocking master FD
     setNonBlocking(master)
-    proterm_set_winsize(master, UInt16(rows), UInt16(columns))
 
-    startPTYReadSource(masterFD: master)
+    // Apply window size immediately and reinforce
+    setWindowSize(fd: master, cols: UInt16(columns), rows: UInt16(rows))
+    forceApplyTTYSizeAndEnv()
+
+    // Monitor child and start reading
     monitorChildProcess(pid: pid)
-    configureIOFeaturesForActivePTY()
+    startPTYReadSource(masterFD: master)
+
+    // Post-attach size push
+    didPostAttachWinch = false
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+      Task { @MainActor [weak self] in
+        self?.postAttachWinchIfNeeded()
+      }
+    }
+
+    // Belt-and-suspenders: immediately force kernel TTY size via stty inside the PTY
+    // Some shells/programs read rows/cols only after startup; this ensures they see correct values.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+      guard let self = self else { return }
+      let cmd = "stty rows \(self.rows) cols \(self.columns)\r"
+      self.sendInput(cmd)
+    }
   }
 
   private func monitorChildProcess(pid: pid_t) {
@@ -997,6 +1260,10 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         }
         // Defensive cleanup (idempotent with cancel handler):
         self.isProcessRunning = false
+        self.pendingCR = false
+        self.didPostAttachWinch = false
+        self.utf8Remainder.removeAll(keepingCapacity: false)
+        self.oscSequenceRemainder.removeAll(keepingCapacity: false)
         let closeMaster = self.masterFD
         self.masterFD = -1
         if closeMaster >= 0 {
@@ -1079,8 +1346,102 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   }
 
   func interruptCurrentProcess() {
-    sendSignal(SIGINT)
-    process?.interrupt()
+    // First, try to send SIGINT to the child process if it exists
+    if childPID > 0 && isPIDAlive(childPID) {
+      _ = kill(childPID, SIGINT)
+    }
+    
+    // Also try to interrupt the Foundation.Process if it exists
+    if let proc = process, proc.isRunning {
+      proc.interrupt()
+    }
+    
+    // If we have a PTY handler, try to send Ctrl+C through it
+    if let handler = ptyHandler, handler.isRunning {
+      // Send Ctrl+C (ASCII 3) to the PTY
+      handler.write("\u{0003}")
+    }
+    
+    // If we have a master FD but no handler, send Ctrl+C directly
+    if masterFD >= 0, isFDValid(masterFD), ptyHandler == nil {
+      let ctrlC = "\u{0003}"
+      if let data = ctrlC.data(using: .utf8) {
+        data.withUnsafeBytes { buffer in
+          guard let base = buffer.baseAddress else { return }
+          _ = Darwin.write(masterFD, base, data.count)
+        }
+      }
+    }
+    
+    // If nothing worked after a short delay, try SIGTERM as a fallback
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+      guard let self = self else { return }
+      
+      // Check if process is still running
+      var stillRunning = false
+      if self.childPID > 0 {
+        stillRunning = self.isPIDAlive(self.childPID)
+      } else if let proc = self.process {
+        stillRunning = proc.isRunning
+      }
+      
+      if stillRunning {
+        // SIGINT didn't work, try SIGTERM
+        if self.childPID > 0 {
+          _ = kill(self.childPID, SIGTERM)
+        }
+        if let proc = self.process, proc.isRunning {
+          proc.terminate()
+        }
+      } else {
+        // Process stopped, clean up state
+        self.isProcessRunning = false
+      }
+    }
+  }
+
+  @MainActor
+  func forceKillCurrentProcess() {
+    // Force kill with SIGKILL - this cannot be caught or ignored
+    if childPID > 0 && isPIDAlive(childPID) {
+      _ = kill(childPID, SIGKILL)
+    }
+    
+    if let proc = process, proc.isRunning {
+      proc.terminate()
+      // Give it a moment, then force kill the PID if still alive
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        guard let self = self else { return }
+        if let p = self.process?.processIdentifier, p > 0, self.isPIDAlive(p) {
+          _ = kill(p, SIGKILL)
+        }
+      }
+    }
+    
+    if let handler = ptyHandler {
+      handler.stop()
+      self.ptyHandler = nil
+    }
+    
+    // Clean up PTY resources
+    ptyReadSource?.cancel()
+    ptyReadSource = nil
+    
+    let closeMaster = self.masterFD
+    self.masterFD = -1
+    if closeMaster >= 0 {
+      DispatchQueue.global(qos: .userInitiated).async {
+        close(closeMaster)
+      }
+    }
+    
+    self.slaveFD = -1
+    self.childPID = 0
+    self.isProcessRunning = false
+    self.process = nil
+    
+    self.ensureSingleTrailingNewline()
+    self.appendOutputChunk("\n[Process force killed]\n")
   }
 
   // Track if this is an SSH session to skip IO features entirely
@@ -1106,6 +1467,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // Configure PTY window size and notify process
     if masterFD >= 0 {
       setWindowSize(fd: masterFD, cols: UInt16(columns), rows: UInt16(rows))
+      forceApplyTTYSizeAndEnv()
     }
 
     // Monitor the child process to detect when it exits
@@ -1172,12 +1534,62 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   @MainActor
   private func handleOutputChunkOnMain(_ chunk: String) {
     guard !isShuttingDown && masterFD >= 0 else { return }
-    
+    // Pre-handle minimal TUI control sequences (clear screen, alt-screen toggle)
+    let processed = processTUIControlSequences(chunk)
+
     // Pass the stateful pendingCR flag to the normalization
-    let (normalized, nextPendingCR) = ANSIParser.normalizeControlCharacters(chunk, pendingCR: self.pendingCR)
+    let (normalized, nextPendingCR) = ANSIParser.normalizeControlCharacters(processed, pendingCR: self.pendingCR)
     self.pendingCR = nextPendingCR
     
     self.appendOutputChunk(normalized)
+  }
+
+  // Minimal handling for common full-screen TUI sequences so output isn’t permanently jumbled
+  // - Clear screen: ESC[2J, ESC[3J, ESC[J  => wipe current output buffer
+  // - Alt screen on:  ESC[?1049h or ESC[?47h => clear and mark alt screen
+  // - Alt screen off: ESC[?1049l or ESC[?47l => exit alt screen (no special action other than flag)
+  @MainActor
+  private func processTUIControlSequences(_ chunk: String) -> String {
+    var s = chunk
+    // Clear screen patterns
+    let clearSeqs = ["\u{001B}[2J", "\u{001B}[3J", "\u{001B}[J"]
+    var didClear = false
+    for seq in clearSeqs {
+      if s.contains(seq) {
+        didClear = true
+        s = s.replacingOccurrences(of: seq, with: "")
+      }
+    }
+    if didClear {
+      // Wipe the visible buffer so the next content renders cleanly
+      self.output = ""
+      self.pendingCR = false
+    }
+
+    // Alternate screen enable
+    let altOnSeqs = ["\u{001B}[?1049h", "\u{001B}[?47h"]
+    for seq in altOnSeqs {
+      if s.contains(seq) {
+        isInAltScreen = true
+        s = s.replacingOccurrences(of: seq, with: "")
+        // Clear when entering alt-screen to simulate a fresh canvas
+        self.output = ""
+        self.pendingCR = false
+      }
+    }
+
+    // Alternate screen disable
+    let altOffSeqs = ["\u{001B}[?1049l", "\u{001B}[?47l"]
+    for seq in altOffSeqs {
+      if s.contains(seq) {
+        isInAltScreen = false
+        s = s.replacingOccurrences(of: seq, with: "")
+        // Ensure we end on a newline so subsequent prompt/commands look clean
+        if !self.output.hasSuffix("\n") { self.output += "\n" }
+      }
+    }
+
+    return s
   }
 
   @MainActor

@@ -133,8 +133,9 @@ struct ANSIParser {
                     i = text.index(after: nextIndex)
                     continue
                 }
-                // Standalone CR: in log-mode, treat as a newline to avoid overwriting content
-                isCRPending = true
+                // Standalone CR: clear the current line so subsequent text overwrites it
+                clearCurrentLine(&buffer)
+                isCRPending = false
                 i = text.index(after: i)
                 continue
             } else if ch == "\n" {

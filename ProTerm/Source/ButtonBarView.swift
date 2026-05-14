@@ -22,6 +22,7 @@ struct ButtonBarView: View {
     @State private var searchQuery = ""
     @State private var findText = ""
     @State private var replaceText = ""
+    @State private var lastInterruptTime: Date? = nil
     @Environment(\.dismiss) private var dismiss   // not used here, kept for completeness
 
     var body: some View {
@@ -351,12 +352,43 @@ struct ButtonBarView: View {
             ToastManager.shared.show("No active session selected", type: .warning)
             return
         }
-        guard session.isProcessRunning || session.hasActivePTY else {
+        
+        // Check if there's actually a process to stop
+        let hasProcess = session.isProcessRunning || session.hasActivePTY
+        let hasValidPID = session.childPID > 0
+        let hasValidProcess = session.process?.isRunning ?? false
+        
+        if !hasProcess && !hasValidPID && !hasValidProcess {
             ToastManager.shared.show("No running command to stop", type: .info)
+            lastInterruptTime = nil
             return
         }
+        
+        // Check if this is a force-kill request (clicked within 3 seconds of last interrupt)
+        let now = Date()
+        if let lastTime = lastInterruptTime, now.timeIntervalSince(lastTime) < 3.0 {
+            // Force kill
+            session.forceKillCurrentProcess()
+            ToastManager.shared.show("Process force killed (SIGKILL)", type: .warning)
+            lastInterruptTime = nil
+            return
+        }
+        
+        // Regular interrupt (Ctrl+C)
         session.interruptCurrentProcess()
-        ToastManager.shared.show("Sent interrupt signal", type: .success)
+        ToastManager.shared.show("Sent interrupt signal (Ctrl+C)", type: .success)
+        lastInterruptTime = now
+        
+        // After 2 seconds, check if process is still running and offer to force kill
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            if session.isProcessRunning || session.hasActivePTY {
+                // Process is still running, might need SIGKILL
+                ToastManager.shared.show("Process still running. Click again within 3s to force kill", type: .warning)
+            } else {
+                // Process stopped successfully
+                self.lastInterruptTime = nil
+            }
+        }
     }
 
     

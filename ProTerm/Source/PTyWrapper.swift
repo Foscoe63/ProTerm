@@ -73,67 +73,53 @@ final class PTYWrapper: @unchecked Sendable {
         ws.ws_ypixel = 0
         _ = ioctl(slave, TIOCSWINSZ, &ws)
 
-        // 5️⃣ Spawn the process using posix_spawn
+        // 5️⃣ Use posix_spawn with proper file actions (fork() is unavailable in Swift on macOS toolchains)
         var pid: pid_t = 0
         var fileActions: posix_spawn_file_actions_t? = nil
         posix_spawn_file_actions_init(&fileActions)
-        // Duplicate slave to stdio
+        // Duplicate slave to stdio in the child
         posix_spawn_file_actions_adddup2(&fileActions, slave, STDIN_FILENO)
         posix_spawn_file_actions_adddup2(&fileActions, slave, STDOUT_FILENO)
         posix_spawn_file_actions_adddup2(&fileActions, slave, STDERR_FILENO)
-        // Close master in child
+        // Close master and slave appropriately in the child
         posix_spawn_file_actions_addclose(&fileActions, master)
 
-        // Build C‑style argv array
+        // Build argv
         var cArgs: [UnsafeMutablePointer<CChar>?] = []
         cArgs.append(strdup(command))
-        for a in args {
-            cArgs.append(strdup(a))
-        }
+        for a in args { cArgs.append(strdup(a)) }
         cArgs.append(nil)
 
-        // Build environment if supplied
+        // Build environment
         var cEnv: [UnsafeMutablePointer<CChar>?] = []
         if let envDict = env {
             for (k, v) in envDict {
-                let pair = "\(k)=\(v)"
-                cEnv.append(strdup(pair))
+                cEnv.append(strdup("\(k)=\(v)"))
             }
         }
         cEnv.append(nil)
 
-        // Spawn with SETSID to ensure controlling terminal is correctly established
+        // Spawn with a new session; on success, the slave duplicated to stdin becomes ctty
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
-        
         let spawnResult = posix_spawn(&pid, command, &fileActions, &attr, cArgs, env != nil ? cEnv : nil)
         posix_spawnattr_destroy(&attr)
-        
-        if spawnResult != 0 {
-            fatalError("posix_spawn failed: \(spawnResult)")
-        }
+
+        // Free C strings
+        for ptr in cArgs where ptr != nil { free(ptr) }
+        if env != nil { for ptr in cEnv where ptr != nil { free(ptr) } }
+
+        guard spawnResult == 0 else { fatalError("posix_spawn failed: \(spawnResult)") }
+
         childPID = pid
-        // Close descriptors not needed in parent
+        // Close slave in parent
         close(slave)
-            // ---------- Parent process ----------
-            masterFD = master
+        masterFD = master
 
-            // Make master non‑blocking
-            let flags = fcntl(masterFD, F_GETFL)
-            _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
-
-            // Don't start reading here - wait for startReading() to be called
-            // This ensures onOutput handler is set before we start reading
-            // Free duplicated C strings allocated with strdup
-            for ptr in cArgs where ptr != nil {
-                free(ptr)
-            }
-            if env != nil {
-                for ptr in cEnv where ptr != nil {
-                    free(ptr)
-                }
-            }
+        // Make master non‑blocking
+        let flags = fcntl(masterFD, F_GETFL)
+        _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
     
     }
 
@@ -223,19 +209,19 @@ final class PTYWrapper: @unchecked Sendable {
         var master: Int32 = -1
         master = posix_openpt(O_RDWR)
         guard master != -1 else { throw NSError(domain: "PTYWrapper", code: 1, userInfo: [NSLocalizedDescriptionKey: "posix_openpt failed"]) }
-        
+
         // 2️⃣ Grant and unlock the slave side
         guard grantpt(master) == 0 else { throw NSError(domain: "PTYWrapper", code: 2, userInfo: [NSLocalizedDescriptionKey: "grantpt failed"]) }
         guard unlockpt(master) == 0 else { throw NSError(domain: "PTYWrapper", code: 3, userInfo: [NSLocalizedDescriptionKey: "unlockpt failed"]) }
-        
+
         // 3️⃣ Obtain slave device name
         guard let slaveNameC = ptsname(master) else { throw NSError(domain: "PTYWrapper", code: 4, userInfo: [NSLocalizedDescriptionKey: "ptsname failed"]) }
         let slavePath = String(cString: slaveNameC)
-        
+
         // 4️⃣ Open the slave side
         let slave = open(slavePath, O_RDWR)
         guard slave != -1 else { throw NSError(domain: "PTYWrapper", code: 5, userInfo: [NSLocalizedDescriptionKey: "open slave failed"]) }
-        
+
         // 4.5️⃣ Set window size on slave before spawning
         var ws = winsize()
         ws.ws_row = UInt16(rows)
@@ -243,48 +229,61 @@ final class PTYWrapper: @unchecked Sendable {
         ws.ws_xpixel = 0
         ws.ws_ypixel = 0
         _ = ioctl(slave, TIOCSWINSZ, &ws)
-        
-        // 5️⃣ Spawn the process using posix_spawn
+
+        // 5️⃣ Use posix_spawn (fork is unavailable). Duplicate slave to stdio in child.
         var pid: pid_t = 0
         var fileActions: posix_spawn_file_actions_t? = nil
         posix_spawn_file_actions_init(&fileActions)
-        // Duplicate slave to stdio
         posix_spawn_file_actions_adddup2(&fileActions, slave, STDIN_FILENO)
         posix_spawn_file_actions_adddup2(&fileActions, slave, STDOUT_FILENO)
         posix_spawn_file_actions_adddup2(&fileActions, slave, STDERR_FILENO)
-        // Close master in child
         posix_spawn_file_actions_addclose(&fileActions, master)
-        
-        // Build C‑style argv array for the shell
+
+        // Build argv for launching a login shell to run the command
         var cArgs: [UnsafeMutablePointer<CChar>?] = []
         cArgs.append(strdup(shellPath))
         cArgs.append(strdup("-l"))
         cArgs.append(strdup("-c"))
         cArgs.append(strdup(command))
         cArgs.append(nil)
-        
-        // Spawn
-        let spawnResult = posix_spawn(&pid, shellPath, &fileActions, nil, cArgs, nil)
-        if spawnResult != 0 {
-            throw NSError(domain: "PTYWrapper", code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: "posix_spawn failed"])
-        }
-        
-        // Clean up C strings
-        for ptr in cArgs where ptr != nil {
-            free(ptr)
-        }
-        
+
+        // Build environment including rows/cols and PWD
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = env["TERM"] ?? "xterm-256color"
+        env["COLUMNS"] = "\(columns)"
+        env["LINES"] = "\(rows)"
+        env["SHELL"] = shellPath
+        env["PWD"] = cwd.path
+        if env["HOME"] == nil { env["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path }
+        let username = NSUserName()
+        if env["USER"] == nil { env["USER"] = username }
+        if env["LOGNAME"] == nil { env["LOGNAME"] = username }
+
+        var cEnv: [UnsafeMutablePointer<CChar>?] = []
+        for (k, v) in env { cEnv.append(strdup("\(k)=\(v)")) }
+        cEnv.append(nil)
+
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETSID))
+        let spawnResult = posix_spawn(&pid, shellPath, &fileActions, &attr, cArgs, cEnv)
+        posix_spawnattr_destroy(&attr)
+
+        for ptr in cArgs where ptr != nil { free(ptr) }
+        for ptr in cEnv where ptr != nil { free(ptr) }
+
+        guard spawnResult == 0 else { throw NSError(domain: "PTYWrapper", code: Int(spawnResult), userInfo: [NSLocalizedDescriptionKey: "posix_spawn failed with code \(spawnResult)"]) }
+
         childPID = pid
-        // Close descriptors not needed in parent
+        // Close slave in parent
         close(slave)
         masterFD = master
-        
+
         // Make master non‑blocking
         let flags = fcntl(masterFD, F_GETFL)
         _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
-        
-        // Don't start reading here - wait for startReading() to be called
-        // This ensures onOutput handler is set before we start reading
+
+        // Do not start reading until startReading is called
     }
     deinit {
         stop()
