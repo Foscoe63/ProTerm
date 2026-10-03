@@ -1353,7 +1353,7 @@ struct TerminalView: View {
   @MainActor
   private func focusCommandFieldInView(_ view: NSView, allowActivation: Bool) {
     // Find the editable NSTextField (command input)
-    guard let textField = focusController.field(for: session.id) ?? findTextField(in: view) else { return }
+    guard let textField = findCommandField(for: session.id, in: view) ?? findTextField(in: view) else { return }
     // Ensure the text field is attached to a window and that window matches the container's window
     guard let tfWindow = textField.window else { return }
     guard
@@ -1410,6 +1410,19 @@ struct TerminalView: View {
         }
       }
     }
+  }
+
+  /// This session's own command field. In a split there are several fields in the window; the generic
+  /// search below would always return the first one.
+  @MainActor
+  private func findCommandField(for sessionID: UUID, in view: NSView) -> NSTextField? {
+    if let field = view as? CustomNSTextField, field.sessionID == sessionID, field.window != nil, !field.isHidden {
+      return field
+    }
+    for subview in view.subviews {
+      if let found = findCommandField(for: sessionID, in: subview) { return found }
+    }
+    return nil
   }
 
   // Helper to find the text field

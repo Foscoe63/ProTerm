@@ -13,6 +13,10 @@ struct SessionSnapshot: Codable {
 final class SessionPersistence: @unchecked Sendable {
     static let shared = SessionPersistence()
     private let fileURL: URL = {
+        // UI tests launch with this flag so they never touch the user's saved tabs.
+        if ProcessInfo.processInfo.arguments.contains("-ProTermUITesting") {
+            return FileManager.default.temporaryDirectory.appendingPathComponent("proterm-uitest-sessions.json")
+        }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let folder = dir.appendingPathComponent("ProTerm")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
