@@ -148,7 +148,13 @@ final class TerminalManager: ObservableObject {
         let commands = template.initialCommands
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        guard !commands.isEmpty else { return session }
+        runStartupCommands(commands, on: session)
+        return session
+    }
+    
+    /// Waits (up to ~8s) for the login shell, then types each command.
+    private func runStartupCommands(_ commands: [String], on session: TerminalSession) {
+        guard !commands.isEmpty else { return }
         Task { @MainActor [weak session] in
             // Wait up to ~8s for the login shell to come up.
             for _ in 0..<80 {
@@ -161,7 +167,32 @@ final class TerminalManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         }
-        return session
+    }
+    
+    // MARK: - Workspaces
+    
+    /// Local tabs only: SSH tabs can't be reopened without reconnecting, so they are skipped.
+    func workspaceTabs() -> [ProductivityTools.WorkspaceTab] {
+        sessions.compactMap { session in
+            guard !session.isSSHSession else { return nil }
+            let meta = getTabMetadata(for: session.id)
+            return ProductivityTools.WorkspaceTab(title: meta.name, color: meta.color.rawValue, cwd: session.cwd.path)
+        }
+    }
+    
+    /// Opens the workspace's tabs after the existing ones and returns the index of the first new tab.
+    @discardableResult
+    func openWorkspace(_ workspace: ProductivityTools.Workspace) -> Int {
+        let first = sessions.count
+        for tab in workspace.tabs {
+            var directory: URL?
+            var isDir: ObjCBool = false
+            if let path = tab.cwd, FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                directory = URL(fileURLWithPath: path)
+            }
+            addSession(initialCWD: directory, name: tab.title, color: TabColor(rawValue: tab.color) ?? .default)
+        }
+        return first
     }
     
     func updateTabName(for sessionId: UUID, name: String) {

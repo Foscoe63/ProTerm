@@ -24,6 +24,7 @@ struct PreferencesView: View {
         case prompt        = "Prompt"
         case quickCommands = "Quick Commands"
         case templates     = "Templates"
+        case workspaces    = "Workspaces"
         case filters       = "Filters"
         case ssh           = "SSH"
         case ai            = "AI"
@@ -117,6 +118,8 @@ struct PreferencesView: View {
                         QuickCommandsSettings()
                     case .templates:
                         TemplateSettings()
+                    case .workspaces:
+                        WorkspaceSettings()
                     case .filters:
                         FilterSettings()
                     case .ssh:
@@ -2448,5 +2451,75 @@ struct FilterSettings: View {
     private func hexString(_ color: Color) -> String {
         let ns = NSColor(color).usingColorSpace(.sRGB) ?? .yellow
         return String(format: "#%02X%02X%02X", Int(ns.redComponent * 255), Int(ns.greenComponent * 255), Int(ns.blueComponent * 255))
+    }
+}
+
+// MARK: - Workspace Settings
+struct WorkspaceSettings: View {
+    @EnvironmentObject var productivityTools: ProductivityTools
+    @EnvironmentObject var terminalManager: TerminalManager
+    @State private var newName = ""
+    @State private var renamingId: UUID?
+    @State private var renameText = ""
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Workspaces").font(.title2).fontWeight(.bold)
+                Text("A workspace remembers your open tabs (name, color and folder) so you can bring the same set back later. SSH tabs are not included. Workspaces also appear in the Command Palette.")
+                    .font(.caption).foregroundColor(.secondary)
+
+                if productivityTools.workspaces.isEmpty { Text("No workspaces yet.").foregroundColor(.secondary) }
+                ForEach(productivityTools.workspaces) { workspace in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            if renamingId == workspace.id {
+                                TextField("Name", text: $renameText).textFieldStyle(.roundedBorder)
+                                Button("Save") {
+                                    productivityTools.renameWorkspace(workspace.id, to: renameText)
+                                    renamingId = nil
+                                }
+                                Button("Cancel") { renamingId = nil }
+                            } else {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(workspace.name).font(.headline)
+                                    Text(workspace.tabs.map(\.title).joined(separator: " · "))
+                                        .font(.caption).foregroundColor(.secondary).lineLimit(2)
+                                }
+                                Spacer()
+                                Button("Open") {
+                                    terminalManager.openWorkspace(workspace)
+                                    productivityTools.markWorkspaceOpened(workspace.id)
+                                }
+                                Button("Update from current tabs") {
+                                    productivityTools.updateWorkspace(workspace.id, tabs: terminalManager.workspaceTabs())
+                                }
+                                Button("Rename") { renamingId = workspace.id; renameText = workspace.name }
+                                Button("Delete", role: .destructive) { productivityTools.deleteWorkspace(workspace.id) }
+                            }
+                        }
+                        ForEach(Array(workspace.tabs.enumerated()), id: \.offset) { _, tab in
+                            Text("\(tab.title)  \(tab.cwd ?? "")")
+                                .font(.system(.caption2, design: .monospaced)).foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(8)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(6)
+                }
+
+                Divider()
+                Text("Save current tabs").font(.headline)
+                HStack {
+                    TextField("Workspace name", text: $newName).textFieldStyle(.roundedBorder)
+                    Button("Save Workspace") {
+                        productivityTools.saveWorkspace(name: newName, tabs: terminalManager.workspaceTabs())
+                        newName = ""
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty || terminalManager.workspaceTabs().isEmpty)
+                }
+            }
+        }
     }
 }

@@ -15,6 +15,7 @@ class ProductivityTools: NSObject, ObservableObject {
         loadBookmarks()
         loadQuickCommands()
         loadSessionTemplates()
+        loadWorkspaces()
         loadOutputFilters()
         loadCustomCategories()
         setupDefaultData()
@@ -109,6 +110,69 @@ class ProductivityTools: NSObject, ObservableObject {
             case maintenance = "Maintenance"
             case testing = "Testing"
             case custom = "Custom"
+        }
+    }
+    
+    // MARK: - Workspaces
+    @Published var workspaces: [Workspace] = []
+    private let workspacesKey = "ProTermWorkspaces"
+    
+    /// A named set of tabs (title, color, folder) that can be reopened together.
+    struct Workspace: Identifiable, Codable, Equatable {
+        let id: UUID
+        var name: String
+        var tabs: [WorkspaceTab]
+        var created: Date
+        var lastOpened: Date?
+    }
+    
+    struct WorkspaceTab: Codable, Equatable {
+        var title: String
+        var color: String
+        var cwd: String?
+    }
+    
+    func saveWorkspace(name: String, tabs: [WorkspaceTab]) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !tabs.isEmpty else { return }
+        workspaces.append(Workspace(id: UUID(), name: trimmed, tabs: tabs, created: Date()))
+        persistWorkspaces()
+    }
+    
+    func updateWorkspace(_ id: UUID, tabs: [WorkspaceTab]) {
+        guard let index = workspaces.firstIndex(where: { $0.id == id }), !tabs.isEmpty else { return }
+        workspaces[index].tabs = tabs
+        persistWorkspaces()
+    }
+    
+    func renameWorkspace(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard let index = workspaces.firstIndex(where: { $0.id == id }), !trimmed.isEmpty else { return }
+        workspaces[index].name = trimmed
+        persistWorkspaces()
+    }
+    
+    func deleteWorkspace(_ id: UUID) {
+        workspaces.removeAll { $0.id == id }
+        persistWorkspaces()
+    }
+    
+    func markWorkspaceOpened(_ id: UUID) {
+        guard let index = workspaces.firstIndex(where: { $0.id == id }) else { return }
+        workspaces[index].lastOpened = Date()
+        persistWorkspaces()
+    }
+    
+    private func loadWorkspaces() {
+        if let data = UserDefaults.standard.data(forKey: workspacesKey),
+           let loaded = try? JSONDecoder().decode([Workspace].self, from: data) {
+            workspaces = loaded
+        }
+    }
+    
+    private func persistWorkspaces() {
+        if let data = try? JSONEncoder().encode(workspaces) {
+            UserDefaults.standard.set(data, forKey: workspacesKey)
         }
     }
     

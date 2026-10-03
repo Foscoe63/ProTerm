@@ -709,6 +709,20 @@ struct CommandPaletteView: View {
             if terminalManager.sessions.indices.contains(selectedTab) { terminalManager.sessions[selectedTab].expandAllSections() }
         })
         
+        // Workspaces
+        for workspace in productivityTools.workspaces {
+            commands.append(CommandItem(
+                title: "Open Workspace: \(workspace.name)",
+                subtitle: "\(workspace.tabs.count) tab\(workspace.tabs.count == 1 ? "" : "s")",
+                icon: "square.stack.3d.up",
+                category: "Workspaces"
+            ) {
+                selectedTab = terminalManager.openWorkspace(workspace)
+                productivityTools.markWorkspaceOpened(workspace.id)
+                ToastManager.shared.show("Opened \(workspace.name)", type: .success)
+            })
+        }
+        
         // Session templates
         for template in productivityTools.sessionTemplates {
             commands.append(CommandItem(
