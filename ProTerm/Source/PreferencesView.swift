@@ -25,6 +25,7 @@ struct PreferencesView: View {
         case quickCommands = "Quick Commands"
         case templates     = "Templates"
         case workspaces    = "Workspaces"
+        case plugins       = "Plugins"
         case filters       = "Filters"
         case ssh           = "SSH"
         case ai            = "AI"
@@ -120,6 +121,8 @@ struct PreferencesView: View {
                         TemplateSettings()
                     case .workspaces:
                         WorkspaceSettings()
+                    case .plugins:
+                        PluginSettings()
                     case .filters:
                         FilterSettings()
                     case .ssh:
@@ -2520,6 +2523,105 @@ struct WorkspaceSettings: View {
                     .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty || terminalManager.workspaceTabs().isEmpty)
                 }
             }
+        }
+    }
+}
+
+// MARK: - Plugin Settings
+struct PluginSettings: View {
+    @ObservedObject private var manager = PluginManager.shared
+    @State private var message: String?
+    @State private var pendingEnable: PluginManager.Plugin?
+    @State private var pendingRemove: PluginManager.Plugin?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Plugins").font(.title2).fontWeight(.bold)
+                Text("A plugin is a folder with a plugin.json that adds commands to the Command Palette. Plugins contain no app code: each command is a shell line typed into your active terminal, so you see exactly what runs. Only enable plugins you trust.")
+                    .font(.caption).foregroundColor(.secondary)
+
+                HStack {
+                    Button("Install from Folder…", action: installFromFolder)
+                    Button("Create Example Plugin") {
+                        do { let folder = try manager.writeExamplePlugin(); message = "Created \(folder.lastPathComponent). Enable it below." }
+                        catch { message = error.localizedDescription }
+                    }
+                    Button("Reload") { manager.reload() }
+                    Button("Open Plugins Folder") { NSWorkspace.shared.open(manager.directory) }
+                }
+                if let message { Text(message).font(.caption).foregroundColor(.secondary) }
+
+                if manager.plugins.isEmpty && manager.failures.isEmpty {
+                    Text("No plugins installed.").foregroundColor(.secondary)
+                }
+                ForEach(manager.plugins) { plugin in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top) {
+                            Toggle("", isOn: Binding(
+                                get: { plugin.isEnabled },
+                                set: { on in
+                                    if on { pendingEnable = plugin } else { manager.setEnabled(false, pluginID: plugin.id) }
+                                })).labelsHidden()
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(plugin.manifest.name)  v\(plugin.manifest.version)").font(.headline)
+                                if let author = plugin.manifest.author { Text("by \(author)").font(.caption).foregroundColor(.secondary) }
+                                if let description = plugin.manifest.description { Text(description).font(.caption) }
+                                if plugin.needsReapproval {
+                                    Text("plugin.json changed since you enabled it. Review and enable again.")
+                                        .font(.caption).foregroundColor(.orange)
+                                }
+                            }
+                            Spacer()
+                            Button("Remove", role: .destructive) { pendingRemove = plugin }
+                        }
+                        ForEach(plugin.manifest.commands) { command in
+                            Text("• \(command.title):  \(command.command)")
+                                .font(.system(.caption2, design: .monospaced)).foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(8).background(Color(NSColor.controlBackgroundColor)).cornerRadius(6)
+                }
+                ForEach(manager.failures) { failure in
+                    Text("⚠︎ \(failure.folder): \(failure.reason)").font(.caption).foregroundColor(.red)
+                }
+            }
+        }
+        .alert("Enable \(pendingEnable?.manifest.name ?? "plugin")?",
+               isPresented: Binding(get: { pendingEnable != nil }, set: { if !$0 { pendingEnable = nil } })) {
+            Button("Enable") { if let plugin = pendingEnable { manager.setEnabled(true, pluginID: plugin.id) }; pendingEnable = nil }
+            Button("Cancel", role: .cancel) { pendingEnable = nil }
+        } message: {
+            if let plugin = pendingEnable {
+                Text("This plugin adds \(plugin.manifest.commands.count) command(s) that run in your terminal as you:\n\n"
+                     + plugin.manifest.commands.prefix(8).map { "• \($0.command)" }.joined(separator: "\n"))
+            }
+        }
+        .alert("Remove \(pendingRemove?.manifest.name ?? "plugin")?",
+               isPresented: Binding(get: { pendingRemove != nil }, set: { if !$0 { pendingRemove = nil } })) {
+            Button("Remove", role: .destructive) {
+                if let plugin = pendingRemove {
+                    do { try manager.remove(pluginID: plugin.id) } catch { message = error.localizedDescription }
+                }
+                pendingRemove = nil
+            }
+            Button("Cancel", role: .cancel) { pendingRemove = nil }
+        } message: {
+            Text("This deletes the plugin's folder from the plugins directory.")
+        }
+    }
+
+    private func installFromFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.message = "Choose a folder that contains plugin.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let id = try manager.install(from: url)
+            message = "Installed \(id). Enable it below."
+        } catch {
+            message = error.localizedDescription
         }
     }
 }

@@ -2,7 +2,7 @@ import SwiftUI
 import Foundation
 import Combine
 
-/// Integration features including git, Docker, SSH, and plugin system
+/// Integration features including git, Docker, and SSH
 @MainActor
 class IntegrationFeatures: NSObject, ObservableObject {
     
@@ -14,8 +14,6 @@ class IntegrationFeatures: NSObject, ObservableObject {
         super.init()
         loadSSHKeys()
         loadSSHConnections()
-        loadPlugins()
-        setupDefaultPlugins()
         
         // Listen for SSH session close events
         NotificationCenter.default.addObserver(
@@ -170,46 +168,6 @@ class IntegrationFeatures: NSObject, ObservableObject {
         case error = "Error"
         case success = "Success"
     }
-    
-    // MARK: - Plugin System
-    @Published var plugins: [Plugin] = []
-    @Published var enabledPlugins: Set<UUID> = []
-    @Published var pluginCategories: [PluginCategory] = []
-    
-    struct Plugin: Identifiable, Codable {
-        let id: UUID
-        let name: String
-        let version: String
-        let description: String
-        let author: String
-        let category: PluginCategory
-        var isEnabled: Bool
-        var isInstalled: Bool
-        var installDate: Date?
-        var lastUpdated: Date?
-        let dependencies: [String]
-        let commands: [PluginCommand]
-    }
-    
-    struct PluginCommand: Identifiable, Codable {
-        let id: UUID
-        let name: String
-        let command: String
-        let description: String
-        let category: String
-        let isEnabled: Bool
-    }
-    
-    enum PluginCategory: String, CaseIterable, Codable {
-        case productivity = "Productivity"
-        case development = "Development"
-        case system = "System"
-        case networking = "Networking"
-        case security = "Security"
-        case utilities = "Utilities"
-        case custom = "Custom"
-    }
-    
     
     // MARK: - Git Integration Methods
     
@@ -522,124 +480,6 @@ class IntegrationFeatures: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.syncStatus = .success
             self.lastSyncDate = Date()
-        }
-    }
-    
-    // MARK: - Plugin System Methods
-    
-    func installPlugin(_ plugin: Plugin) {
-        if let index = plugins.firstIndex(where: { $0.id == plugin.id }) {
-            plugins[index].isInstalled = true
-            plugins[index].installDate = Date()
-            enabledPlugins.insert(plugin.id)
-        }
-        savePlugins()
-    }
-    
-    func uninstallPlugin(_ plugin: Plugin) {
-        if let index = plugins.firstIndex(where: { $0.id == plugin.id }) {
-            plugins[index].isInstalled = false
-            plugins[index].installDate = nil
-            enabledPlugins.remove(plugin.id)
-        }
-        savePlugins()
-    }
-    
-    func enablePlugin(_ plugin: Plugin) {
-        enabledPlugins.insert(plugin.id)
-        if let index = plugins.firstIndex(where: { $0.id == plugin.id }) {
-            plugins[index].isEnabled = true
-        }
-        savePlugins()
-    }
-    
-    func disablePlugin(_ plugin: Plugin) {
-        enabledPlugins.remove(plugin.id)
-        if let index = plugins.firstIndex(where: { $0.id == plugin.id }) {
-            plugins[index].isEnabled = false
-        }
-        savePlugins()
-    }
-    
-    func updatePlugin(_ plugin: Plugin) {
-        if let index = plugins.firstIndex(where: { $0.id == plugin.id }) {
-            plugins[index].lastUpdated = Date()
-        }
-        savePlugins()
-    }
-    
-    private func loadPlugins() {
-        if let data = UserDefaults.standard.data(forKey: "ProTermPlugins"),
-           let loadedPlugins = try? JSONDecoder().decode([Plugin].self, from: data) {
-            plugins = loadedPlugins
-        }
-    }
-    
-    private func savePlugins() {
-        if let data = try? JSONEncoder().encode(plugins) {
-            UserDefaults.standard.set(data, forKey: "ProTermPlugins")
-        }
-    }
-    
-    private func setupDefaultPlugins() {
-        if plugins.isEmpty {
-            let defaultPlugins = [
-                Plugin(
-                    id: UUID(),
-                    name: "Git Integration",
-                    version: "1.0.0",
-                    description: "Enhanced git integration with status, branches, and commits",
-                    author: "ProTerm Team",
-                    category: .development,
-                    isEnabled: true,
-                    isInstalled: true,
-                    installDate: Date(),
-                    lastUpdated: nil,
-                    dependencies: [],
-                    commands: [
-                        PluginCommand(id: UUID(), name: "git-status", command: "git status", description: "Show git status", category: "git", isEnabled: true),
-                        PluginCommand(id: UUID(), name: "git-branches", command: "git branch -a", description: "List all branches", category: "git", isEnabled: true)
-                    ]
-                ),
-                Plugin(
-                    id: UUID(),
-                    name: "Docker Helper",
-                    version: "1.0.0",
-                    description: "Docker container and image management",
-                    author: "ProTerm Team",
-                    category: .development,
-                    isEnabled: true,
-                    isInstalled: true,
-                    installDate: Date(),
-                    lastUpdated: nil,
-                    dependencies: [],
-                    commands: [
-                        PluginCommand(id: UUID(), name: "docker-ps", command: "docker ps", description: "List running containers", category: "docker", isEnabled: true),
-                        PluginCommand(id: UUID(), name: "docker-images", command: "docker images", description: "List images", category: "docker", isEnabled: true)
-                    ]
-                ),
-                Plugin(
-                    id: UUID(),
-                    name: "System Monitor",
-                    version: "1.0.0",
-                    description: "System resource monitoring and management",
-                    author: "ProTerm Team",
-                    category: .system,
-                    isEnabled: true,
-                    isInstalled: true,
-                    installDate: Date(),
-                    lastUpdated: nil,
-                    dependencies: [],
-                    commands: [
-                        PluginCommand(id: UUID(), name: "system-info", command: "uname -a", description: "System information", category: "system", isEnabled: true),
-                        PluginCommand(id: UUID(), name: "disk-usage", command: "df -h", description: "Disk usage", category: "system", isEnabled: true)
-                    ]
-                )
-            ]
-            
-            plugins = defaultPlugins
-            enabledPlugins = Set(plugins.map { $0.id })
-            savePlugins()
         }
     }
 }

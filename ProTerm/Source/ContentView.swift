@@ -760,6 +760,19 @@ struct CommandPaletteView: View {
             if terminalManager.sessions.indices.contains(selectedTab) { terminalManager.activeSession(at: selectedTab).expandAllSections() }
         })
         
+        // Plugins
+        for (plugin, command) in PluginManager.shared.enabledCommands {
+            commands.append(CommandItem(
+                title: "\(plugin.manifest.name): \(command.title)",
+                subtitle: command.description ?? command.command,
+                icon: command.icon ?? "puzzlepiece.extension",
+                category: "Plugins"
+            ) {
+                guard terminalManager.sessions.indices.contains(selectedTab) else { return }
+                PluginManager.shared.run(command, of: plugin, in: terminalManager.activeSession(at: selectedTab))
+            })
+        }
+        
         // Workspaces
         for workspace in productivityTools.workspaces {
             commands.append(CommandItem(
