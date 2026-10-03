@@ -10,8 +10,23 @@ final class TerminalManager: ObservableObject {
 
     /// The UI watches this array for changes (new/closed sessions).
     @Published var sessions: [TerminalSession] = [] {
-        didSet { persistSnapshot() }
+        didSet {
+            persistSnapshot()
+            reconcilePanes()
+        }
     }
+    
+    // MARK: - Split panes
+    
+    /// Split layout per tab, keyed by the tab's own session ID. Absent = the tab is a single pane.
+    @Published private(set) var paneLayouts: [UUID: PaneNode] = [:]
+    /// The focused pane per tab (a session ID inside that tab's layout).
+    @Published private(set) var activePane: [UUID: UUID] = [:]
+    /// Sessions that live only inside a split (not shown as tabs).
+    private var paneSessions: [UUID: TerminalSession] = [:]
+    /// Every session in a split (including the tab's own) -> the tab ID that owns it.
+    private var paneOwner: [UUID: UUID] = [:]
+    static let maxPanesPerTab = 6
     
     /// Tab metadata (names, colors) indexed by session ID
     @Published var tabMetadata: [UUID: TabMetadata] = [:]
@@ -112,6 +127,103 @@ final class TerminalManager: ObservableObject {
         SessionPersistence.shared.save(snapshots: snapshots)
     }
 
+    // MARK: - Pane operations
+    
+    func session(forPane id: UUID) -> TerminalSession? {
+        paneSessions[id] ?? sessions.first { $0.id == id }
+    }
+    
+    /// The session that actions (clear, run command, record...) should target for a tab.
+    func activeSession(at tabIndex: Int) -> TerminalSession {
+        let tab = sessions[tabIndex]
+        if let active = activePane[tab.id], let session = session(forPane: active) { return session }
+        return tab
+    }
+    
+    /// True unless the session is in a split and some other pane is focused. Programmatic focus grabs
+    /// check this so a background pane's activity can't steal focus from the one being typed in.
+    func isActivePane(_ sessionID: UUID) -> Bool {
+        guard let tab = paneOwner[sessionID] else { return true }
+        return (activePane[tab] ?? tab) == sessionID
+    }
+    
+    func setActivePane(_ sessionID: UUID) {
+        guard let tab = paneOwner[sessionID], activePane[tab] != sessionID else { return }
+        activePane[tab] = sessionID
+    }
+    
+    @discardableResult
+    func splitActivePane(inTab index: Int, axis: PaneAxis) -> TerminalSession? {
+        guard sessions.indices.contains(index) else { return nil }
+        let tab = sessions[index]
+        let layout = paneLayouts[tab.id] ?? .leaf(tab.id)
+        guard layout.leafIDs.count < Self.maxPanesPerTab else { return nil }
+        let active = activeSession(at: index)
+        let session = TerminalSession(
+            shellManager: shellManager ?? ShellManager(),
+            initialCWD: active.isSSHSession ? FileManager.default.homeDirectoryForCurrentUser : active.cwd)
+        paneSessions[session.id] = session
+        paneOwner[tab.id] = tab.id
+        paneOwner[session.id] = tab.id
+        paneLayouts[tab.id] = layout.splitting(leaf: active.id, axis: axis, newLeaf: session.id)
+        activePane[tab.id] = session.id
+        return session
+    }
+    
+    /// Closes the focused pane. The tab's own (first) pane can't be closed this way; close the tab instead.
+    @discardableResult
+    func closeActivePane(inTab index: Int) -> Bool {
+        guard sessions.indices.contains(index) else { return false }
+        let tab = sessions[index]
+        guard let layout = paneLayouts[tab.id], let active = activePane[tab.id], active != tab.id,
+              let remaining = layout.removing(leaf: active) else { return false }
+        if let session = paneSessions[active] { terminate(session) }
+        paneSessions.removeValue(forKey: active)
+        paneOwner.removeValue(forKey: active)
+        if remaining == .leaf(tab.id) {
+            paneLayouts.removeValue(forKey: tab.id)
+            activePane.removeValue(forKey: tab.id)
+            paneOwner.removeValue(forKey: tab.id)
+        } else {
+            paneLayouts[tab.id] = remaining
+            activePane[tab.id] = remaining.leafIDs.first
+        }
+        return true
+    }
+    
+    /// Moves focus to the next/previous pane in reading order.
+    func cyclePane(inTab index: Int, forward: Bool) {
+        guard sessions.indices.contains(index), let layout = paneLayouts[sessions[index].id] else { return }
+        let ids = layout.leafIDs
+        let current = ids.firstIndex(of: activeSession(at: index).id) ?? 0
+        let next = (current + (forward ? 1 : ids.count - 1)) % ids.count
+        activePane[sessions[index].id] = ids[next]
+    }
+    
+    /// Tears down pane sessions whose tab no longer exists (tab closed by any path).
+    private func reconcilePanes() {
+        guard !paneLayouts.isEmpty else { return }
+        let liveTabs = Set(sessions.map(\.id))
+        for tabID in paneLayouts.keys where !liveTabs.contains(tabID) {
+            for id in paneLayouts[tabID]?.leafIDs ?? [] where id != tabID {
+                if let session = paneSessions[id] { terminate(session) }
+                paneSessions.removeValue(forKey: id)
+                paneOwner.removeValue(forKey: id)
+            }
+            paneOwner.removeValue(forKey: tabID)
+            paneLayouts.removeValue(forKey: tabID)
+            activePane.removeValue(forKey: tabID)
+        }
+    }
+    
+    private func terminate(_ session: TerminalSession) {
+        session.stopRecording()
+        if session.isSSHSession {
+            NotificationCenter.default.post(name: Notification.Name("ProTermSSHSessionClosed"), object: session.id)
+        }
+        if session.childPID > 0 { _ = kill(session.childPID, SIGKILL) }
+    }
+    
     // MARK: – Session handling
     @discardableResult
     func addSession(

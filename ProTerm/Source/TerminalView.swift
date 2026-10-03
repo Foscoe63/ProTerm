@@ -88,7 +88,7 @@ struct TerminalView: View {
       commandInput = ""
       // Still restore focus even for empty commands
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-        self.commandFieldIsFocused = true
+        self.requestFieldFocus()
         self.requestControllerFocus(reason: .manual)
         // Also broadcast a focus request to ensure AppKit first responder is set
         NotificationCenter.default.post(
@@ -102,7 +102,7 @@ struct TerminalView: View {
     guard !session.isProcessRunning || session.hasActivePTY else {
       // Restore focus even if command can't run
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-        commandFieldIsFocused = true
+        requestFieldFocus()
         requestControllerFocus(reason: .manual)
         NotificationCenter.default.post(
           name: .focusCommandInput, object: session.id)
@@ -122,14 +122,14 @@ struct TerminalView: View {
     // Return focus to the field after running (with delay to ensure view has updated)
     // Use a longer delay to ensure all output updates have completed
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-        commandFieldIsFocused = true
+        requestFieldFocus()
         requestControllerFocus(reason: .manual)
         NotificationCenter.default.post(
           name: .focusCommandInput, object: session.id)
       
       // Also try again after a bit more time in case output is still updating
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-          commandFieldIsFocused = true
+          requestFieldFocus()
           requestControllerFocus(reason: .manual)
           NotificationCenter.default.post(
             name: .focusCommandInput, object: session.id)
@@ -172,10 +172,12 @@ struct TerminalView: View {
         commandFieldIsFocused: commandFieldIsFocused,
         lastTypingTime: lastTypingTime,
         requestControllerFocus: requestControllerFocus,
+        isActivePane: isActivePane,
         commandFieldIsFocusedBinding: $commandFieldIsFocusedState
       ))
       .onChange(of: commandFieldIsFocused) { _, newValue in
         commandFieldIsFocusedState = newValue
+        if newValue { terminalManager.setActivePane(session.id) }
       }
       .onChange(of: commandFieldIsFocusedState) { _, newValue in
         commandFieldIsFocused = newValue
@@ -189,6 +191,7 @@ struct TerminalView: View {
         passwordInput: $passwordInput,
         commandInput: $commandInput,
         commandFieldIsFocused: $commandFieldIsFocusedState,
+        isActivePane: isActivePane,
         lastPasswordSentTime: $lastPasswordSentTime,
         isPasswordBeingSent: $isPasswordBeingSent,
         outputSnapshotWhenPasswordSent: $outputSnapshotWhenPasswordSent,
@@ -207,6 +210,7 @@ struct TerminalView: View {
         updateCachedAttributedOutput: updateCachedAttributedOutput,
         applyPaste: applyPaste,
         applyRedo: applyRedo,
+        isActivePane: isActivePane,
         forceFocus: { reason in forceFocus(reason: reason) },
         showSystemInfo: showSystemInfo,
         presentHistoryIfNeeded: presentHistoryIfNeeded,
@@ -543,7 +547,7 @@ struct TerminalView: View {
       DispatchQueue.main.async {
         // Always start at bottom on appear (user can scroll if needed)
         proxy.scrollTo("BOTTOM", anchor: .bottom)
-        commandFieldIsFocused = true
+        requestFieldFocus()
       }
     }
     .frame(width: availableWidth, height: availableHeight)
@@ -634,7 +638,7 @@ struct TerminalView: View {
               commandInput = ""
               // Keep focus on the field for next pagination key
               DispatchQueue.main.async {
-                commandFieldIsFocused = true
+                requestFieldFocus()
               }
             }
           },
@@ -664,7 +668,7 @@ struct TerminalView: View {
               showPaginationInput = true
               // Keep focus on the field for next pagination key
               DispatchQueue.main.async {
-                self.commandFieldIsFocused = true
+                self.requestFieldFocus()
               }
             }
           }
@@ -790,7 +794,7 @@ struct TerminalView: View {
               commandInput = ""
               // Keep focus on the field for next pagination key
               DispatchQueue.main.async {
-                commandFieldIsFocused = true
+                requestFieldFocus()
               }
               return
             }
@@ -811,7 +815,7 @@ struct TerminalView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                     // Only restore focus if we're not in password or pagination mode
                     if !self.showPasswordInput && !self.showPaginationInput {
-                      self.commandFieldIsFocused = true
+                      self.requestFieldFocus()
                       self.requestControllerFocus(reason: .manual)
                       NotificationCenter.default.post(
                         name: .focusCommandInput, object: self.session.id)
@@ -918,7 +922,7 @@ struct TerminalView: View {
         // Restore focus after process completes - use multiple attempts to ensure it works
         for delay in [0.1, 0.3, 0.5] {
           DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            self.commandFieldIsFocused = true
+            self.requestFieldFocus()
             self.requestControllerFocus(reason: .manual)
             NotificationCenter.default.post(
               name: .focusCommandInput, object: self.session.id)
@@ -935,7 +939,7 @@ struct TerminalView: View {
       if !session.isProcessRunning && commandFieldIsFocused {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
           if !session.isProcessRunning && commandFieldIsFocused {
-              commandFieldIsFocused = true
+              requestFieldFocus()
           }
         }
       }
@@ -1038,10 +1042,10 @@ struct TerminalView: View {
                               commandInput = ""
                               // Restore focus after a delay to ensure view has updated
                               DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                  commandFieldIsFocused = true
+                                  requestFieldFocus()
                                   // Also try again after a bit more time
                                   DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                      commandFieldIsFocused = true
+                                      requestFieldFocus()
                                   }
                               }
                           } else if !cmd.isEmpty {
@@ -1089,7 +1093,7 @@ struct TerminalView: View {
                       // Try with multiple delays to ensure the view is ready
                       for delay in [0.05, 0.1, 0.2, 0.3] {
                           DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                              commandFieldIsFocused = true
+                              requestFieldFocus()
                               NSApp.activate(ignoringOtherApps: true)
                               if let window = NSApplication.shared.mainWindow {
                                   window.makeKeyAndOrderFront(nil)
@@ -1128,10 +1132,10 @@ struct TerminalView: View {
                       commandInput = ""
                       // Restore focus with a delay to ensure view has updated
                       DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                          commandFieldIsFocused = true
+                          requestFieldFocus()
                           // Also try again after a bit more time in case output is still updating
                           DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                              commandFieldIsFocused = true
+                              requestFieldFocus()
                           }
                       }
                   }
@@ -1148,7 +1152,7 @@ struct TerminalView: View {
                       DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                           // Double-check conditions before restoring focus
                           if !session.isProcessRunning && commandFieldIsFocused {
-                              commandFieldIsFocused = true
+                              requestFieldFocus()
                           }
                       }
                   }
@@ -1275,7 +1279,7 @@ struct TerminalView: View {
     for delay in [0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0] {
       DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
           // Set the SwiftUI focus state
-          self.commandFieldIsFocused = true
+          self.requestFieldFocus()
           
           // Force app and window activation
           NSApp.activate(ignoringOtherApps: true)
@@ -1302,8 +1306,20 @@ struct TerminalView: View {
   
   @MainActor
   private func requestControllerFocus(reason: CommandInputFocusController.FocusReason) {
+    guard isActivePane() else { return }
     focusController.setActiveSession(session.id)
     focusController.requestFocus(for: session.id, reason: reason)
+  }
+
+  /// False when this view is a background pane in a split; such panes must not grab focus on their own.
+  private func isActivePane() -> Bool {
+    terminalManager.isActivePane(session.id)
+  }
+
+  /// Focuses this pane's command field unless another pane in the split is the active one.
+  private func requestFieldFocus() {
+    guard isActivePane() else { return }
+    commandFieldIsFocused = true
   }
 
   // Helper to forcefully set focus
@@ -1326,7 +1342,7 @@ struct TerminalView: View {
       guard NSApp.isActive, window.isKeyWindow else { return }
     }
 
-    self.commandFieldIsFocused = true
+    self.requestFieldFocus()
 
     if let contentView = window.contentView {
       self.focusCommandFieldInView(contentView, allowActivation: allowActivation)
@@ -1337,7 +1353,7 @@ struct TerminalView: View {
   @MainActor
   private func focusCommandFieldInView(_ view: NSView, allowActivation: Bool) {
     // Find the editable NSTextField (command input)
-    guard let textField = findTextField(in: view) else { return }
+    guard let textField = focusController.field(for: session.id) ?? findTextField(in: view) else { return }
     // Ensure the text field is attached to a window and that window matches the container's window
     guard let tfWindow = textField.window else { return }
     guard
@@ -1477,7 +1493,7 @@ struct TerminalView: View {
       return
     }
     
-    commandFieldIsFocused = true
+    requestFieldFocus()
     requestControllerFocus(reason: .manual)
     
     // Directly focus the text field via AppKit for more reliable focus
@@ -1696,7 +1712,7 @@ struct TerminalView: View {
         if !showPaginationInput {
             showPaginationInput = true
             DispatchQueue.main.async {
-                commandFieldIsFocused = true
+                requestFieldFocus()
             }
         }
         return // Stay in pagination mode, don't check for prompts or cooldowns
@@ -1706,7 +1722,7 @@ struct TerminalView: View {
     if hasClearPrompt {
         if showPaginationInput {
             showPaginationInput = false
-            commandFieldIsFocused = true
+            requestFieldFocus()
             lastPaginationKeySentTime = nil
         }
         return
@@ -1723,7 +1739,7 @@ struct TerminalView: View {
     
     if showPaginationInput {
       showPaginationInput = false
-      commandFieldIsFocused = true
+      requestFieldFocus()
     }
   }
 
@@ -1766,7 +1782,7 @@ struct TerminalView: View {
         // Restore focus with multiple attempts to ensure it works
         for delay in [0.1, 0.3, 0.5] {
           DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            self.commandFieldIsFocused = true
+            self.requestFieldFocus()
             self.requestControllerFocus(reason: .manual)
             NotificationCenter.default.post(
               name: .focusCommandInput, object: self.session.id)
@@ -1926,7 +1942,7 @@ struct TerminalView: View {
       // Restore focus to command field. Even if the process is still running
       // (after successful sudo/ssh), we want the caret visible in the command line.
       DispatchQueue.main.async {
-        commandFieldIsFocused = true
+        requestFieldFocus()
         NotificationCenter.default.post(
           name: .focusCommandInput, object: session.id)
       }
@@ -1977,7 +1993,7 @@ struct TerminalView: View {
     if visualSettings.enableBracketedPaste {
       hasPendingBracketedPaste = true
     }
-    commandFieldIsFocused = true
+    requestFieldFocus()
   }
 
   private func preparePTYInputPayload(from text: String) -> String {
@@ -2006,14 +2022,14 @@ struct TerminalView: View {
             window.makeKeyAndOrderFront(nil)
           }
           // Set focus binding
-          self.commandFieldIsFocused = true
+          self.requestFieldFocus()
           // Also try to directly focus the text field (multiple attempts like history sheet)
           DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.commandFieldIsFocused = true
+            self.requestFieldFocus()
           }
           // One more attempt to ensure focus
           DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.commandFieldIsFocused = true
+            self.requestFieldFocus()
           }
         }
       }
@@ -2044,10 +2060,10 @@ struct TerminalView: View {
           window.makeKeyAndOrderFront(nil)
         }
         // Set focus binding
-        self.commandFieldIsFocused = true
+        self.requestFieldFocus()
         // Also try to directly focus the text field
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-          self.commandFieldIsFocused = true
+          self.requestFieldFocus()
         }
       }
     }

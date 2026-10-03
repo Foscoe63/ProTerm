@@ -15,7 +15,7 @@ struct StatusBarView: View {
     
     var currentSession: TerminalSession? {
         guard terminalManager.sessions.indices.contains(selectedTab) else { return nil }
-        return terminalManager.sessions[selectedTab]
+        return terminalManager.activeSession(at: selectedTab)
     }
 
     /// True when a foreground command is running (not the idle login-shell PTY).

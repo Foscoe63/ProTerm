@@ -86,6 +86,23 @@ struct ProTermApp: App {
                     NotificationCenter.default.post(name: SessionExporter.shareNotification, object: nil)
                 }
                 Divider()
+                Button("Split Pane Right") {
+                    NotificationCenter.default.post(name: .proTermSplitPane, object: nil)
+                }
+                .keyboardShortcut("d", modifiers: [.command])
+                Button("Split Pane Down") {
+                    NotificationCenter.default.post(name: .proTermSplitPane, object: nil, userInfo: ["vertical": true])
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+                Button("Close Pane") { NotificationCenter.default.post(name: .proTermClosePane, object: nil) }
+                    .keyboardShortcut("w", modifiers: [.command, .option])
+                Button("Next Pane") { NotificationCenter.default.post(name: .proTermCyclePane, object: nil) }
+                    .keyboardShortcut("]", modifiers: [.command])
+                Button("Previous Pane") {
+                    NotificationCenter.default.post(name: .proTermCyclePane, object: nil, userInfo: ["forward": false])
+                }
+                .keyboardShortcut("[", modifiers: [.command])
+                Divider()
                 Button("Start Recording") { NotificationCenter.default.post(name: .proTermStartRecording, object: nil) }
                 Button("Stop Recording") { NotificationCenter.default.post(name: .proTermStopRecording, object: nil) }
                 Button("Play Recording…") { NotificationCenter.default.post(name: .proTermPlayRecording, object: nil) }

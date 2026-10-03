@@ -39,7 +39,7 @@ struct ButtonBarView: View {
                 QuickSearchSheet(searchQuery: $searchQuery)
             }
             .sheet(isPresented: $showingChatbot) {
-                ChatbotView(session: terminalManager.sessions.indices.contains(selectedTab) ? terminalManager.sessions[selectedTab] : nil)
+                ChatbotView(session: terminalManager.sessions.indices.contains(selectedTab) ? terminalManager.activeSession(at: selectedTab) : nil)
             }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermShowPreferences"))) { _ in
                 showingPreferences = true
@@ -281,7 +281,7 @@ struct ButtonBarView: View {
     
     private func copyAsHTML() {
         guard terminalManager.sessions.indices.contains(selectedTab) else { return }
-        let session = terminalManager.sessions[selectedTab]
+        let session = terminalManager.activeSession(at: selectedTab)
         let html = convertToHTML(session.output)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(html, forType: .html)
@@ -290,7 +290,7 @@ struct ButtonBarView: View {
     
     private func copyAsRTF() {
         guard terminalManager.sessions.indices.contains(selectedTab) else { return }
-        let session = terminalManager.sessions[selectedTab]
+        let session = terminalManager.activeSession(at: selectedTab)
         let font = Font.system(size: 12, weight: .regular, design: .monospaced)
         let attributedString = ANSIParser.parse(session.output, baseFont: font)
         let nsAttributedString = NSAttributedString(attributedString)
@@ -332,7 +332,7 @@ struct ButtonBarView: View {
     
     private var activeSession: TerminalSession? {
         guard terminalManager.sessions.indices.contains(selectedTab) else { return nil }
-        return terminalManager.sessions[selectedTab]
+        return terminalManager.activeSession(at: selectedTab)
     }
     
     private var canStopProcess: Bool {
@@ -394,27 +394,27 @@ struct ButtonBarView: View {
     
     private func clearScreen() {
         guard terminalManager.sessions.indices.contains(selectedTab) else { return }
-        let session = terminalManager.sessions[selectedTab]
+        let session = terminalManager.activeSession(at: selectedTab)
         session.clearOutput()
         ToastManager.shared.show("Screen cleared", type: .info)
     }
     
     private func showHistory() {
         guard terminalManager.sessions.indices.contains(selectedTab) else { return }
-        let session = terminalManager.sessions[selectedTab]
+        let session = terminalManager.activeSession(at: selectedTab)
         NotificationCenter.default.post(name: .showHistory, object: session)
     }
     
     private func copyLastCommand() {
         guard terminalManager.sessions.indices.contains(selectedTab) else { return }
-        let session = terminalManager.sessions[selectedTab]
+        let session = terminalManager.activeSession(at: selectedTab)
         NotificationCenter.default.post(name: .copyLastCommand, object: session)
         ToastManager.shared.show("Last command copied", type: .success)
     }
     
     private func showSystemInfo() {
         guard terminalManager.sessions.indices.contains(selectedTab) else { return }
-        let session = terminalManager.sessions[selectedTab]
+        let session = terminalManager.activeSession(at: selectedTab)
         NotificationCenter.default.post(name: .showSystemInfo, object: session)
     }
     

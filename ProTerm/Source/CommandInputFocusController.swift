@@ -65,6 +65,11 @@ final class CommandInputFocusController {
         log("unregister success session=\(sessionID.uuidString)")
     }
 
+    /// The registered command field for a session, so callers focus the right pane's field in a split.
+    func field(for sessionID: UUID) -> CustomNSTextField? {
+        fieldTable[sessionID]?.field
+    }
+
     func setActiveSession(_ id: UUID?) {
         guard activeSessionID != id else { return }
         let old = activeSessionID?.uuidString ?? "nil"

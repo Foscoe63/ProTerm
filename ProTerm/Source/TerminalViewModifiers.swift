@@ -45,6 +45,7 @@ struct FocusRestorationModifier: ViewModifier {
   let commandFieldIsFocused: Bool
   let lastTypingTime: Date?
   let requestControllerFocus: (CommandInputFocusController.FocusReason) -> Void
+  let isActivePane: () -> Bool
   @Binding var commandFieldIsFocusedBinding: Bool
   
   func body(content: Content) -> some View {
@@ -58,7 +59,8 @@ struct FocusRestorationModifier: ViewModifier {
              session.isSSHSession && 
              session.isProcessRunning &&
              !commandFieldIsFocused &&
-             !recentlyTyped {
+             !recentlyTyped &&
+             isActivePane() {
             commandFieldIsFocusedBinding = true
             requestControllerFocus(.manual)
           }
@@ -82,6 +84,7 @@ struct OutputChangeModifier: ViewModifier {
   @Binding var passwordInput: String
   @Binding var commandInput: String
   @Binding var commandFieldIsFocused: Bool
+  let isActivePane: () -> Bool
   @Binding var lastPasswordSentTime: Date?
   @Binding var isPasswordBeingSent: Bool
   @Binding var outputSnapshotWhenPasswordSent: String
@@ -110,13 +113,13 @@ struct OutputChangeModifier: ViewModifier {
           lastPasswordSentTime = nil
           isPasswordBeingSent = false
           outputSnapshotWhenPasswordSent = ""
-          commandFieldIsFocused = true
+          if isActivePane() { commandFieldIsFocused = true }
         }
         if !isRunning && showPaginationInput {
           showPaginationInputBinding = false
           lastPaginationKeySentTime = nil
           commandInput = ""
-          commandFieldIsFocused = true
+          if isActivePane() { commandFieldIsFocused = true }
         }
       }
   }

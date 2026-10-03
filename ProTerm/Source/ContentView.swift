@@ -68,7 +68,7 @@ struct ContentView: View {
                                 window.makeKeyAndOrderFront(nil)
                                 // Post focus notification immediately
                                 if terminalManager.sessions.indices.contains(selectedTab) {
-                                    let targetId = terminalManager.sessions[selectedTab].id
+                                    let targetId = terminalManager.activeSession(at: selectedTab).id
                                     NotificationCenter.default.post(name: .focusCommandInput, object: targetId)
                                     Task { @MainActor in
                                         focusCurrentSession(reason: .startup)
@@ -82,7 +82,7 @@ struct ContentView: View {
                             if let window = NSApplication.shared.mainWindow {
                                 window.makeKeyAndOrderFront(nil)
                                 if terminalManager.sessions.indices.contains(selectedTab) {
-                                    let targetId = terminalManager.sessions[selectedTab].id
+                                    let targetId = terminalManager.activeSession(at: selectedTab).id
                                     NotificationCenter.default.post(name: .focusCommandInput, object: targetId)
                                     Task { @MainActor in
                                         focusCurrentSession(reason: .startup)
@@ -96,7 +96,7 @@ struct ContentView: View {
                         DispatchQueue.main.async {
                             NSApp.activate(ignoringOtherApps: true)
                             if terminalManager.sessions.indices.contains(selectedTab) {
-                                let targetId = terminalManager.sessions[selectedTab].id
+                                let targetId = terminalManager.activeSession(at: selectedTab).id
                                 // Post focus notification for the current session
                                 NotificationCenter.default.post(name: .focusCommandInput, object: targetId)
                                 Task { @MainActor in
@@ -148,7 +148,13 @@ struct ContentView: View {
                 // MARK: – Terminal View
                 if terminalManager.sessions.indices.contains(selectedTab) {
                     let currentSession = terminalManager.sessions[selectedTab]
-                    TerminalView(session: currentSession)
+                    Group {
+                        if let layout = terminalManager.paneLayouts[currentSession.id] {
+                            PaneTreeView(node: layout, tabID: currentSession.id)
+                        } else {
+                            TerminalView(session: currentSession)
+                        }
+                    }
                         .id(currentSession.id) // Force SwiftUI to create a new view for each session
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .accessibilityElement(children: .contain)
@@ -281,7 +287,7 @@ struct ContentView: View {
             // When window becomes key, set focus on command field
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 if terminalManager.sessions.indices.contains(selectedTab) {
-                    let targetId = terminalManager.sessions[selectedTab].id
+                    let targetId = terminalManager.activeSession(at: selectedTab).id
                     NotificationCenter.default.post(name: .focusCommandInput, object: targetId)
                     Task { @MainActor in
                         focusCurrentSession(reason: .windowBecameKey)
@@ -296,11 +302,33 @@ struct ContentView: View {
             guard terminalManager.sessions.indices.contains(selectedTab),
                   let raw = note.userInfo?["format"] as? String,
                   let format = ProductivityTools.ExportFormat(rawValue: raw) else { return }
-            SessionExporter.export(terminalManager.sessions[selectedTab], format: format)
+            SessionExporter.export(terminalManager.activeSession(at: selectedTab), format: format)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .proTermSplitPane)) { note in
+            guard terminalManager.sessions.indices.contains(selectedTab) else { return }
+            let axis: PaneAxis = (note.userInfo?["vertical"] as? Bool) == true ? .vertical : .horizontal
+            if terminalManager.splitActivePane(inTab: selectedTab, axis: axis) != nil {
+                focusActivePane()
+            } else {
+                ToastManager.shared.show("Pane limit reached (\(TerminalManager.maxPanesPerTab))", type: .warning)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .proTermClosePane)) { _ in
+            guard terminalManager.sessions.indices.contains(selectedTab) else { return }
+            if terminalManager.closeActivePane(inTab: selectedTab) {
+                focusActivePane()
+            } else {
+                ToastManager.shared.show("Only split panes can be closed here; use Close Tab for the first pane", type: .info)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .proTermCyclePane)) { note in
+            guard terminalManager.sessions.indices.contains(selectedTab) else { return }
+            terminalManager.cyclePane(inTab: selectedTab, forward: (note.userInfo?["forward"] as? Bool) ?? true)
+            focusActivePane()
         }
         .onReceive(NotificationCenter.default.publisher(for: .proTermStartRecording)) { _ in
             guard terminalManager.sessions.indices.contains(selectedTab) else { return }
-            let session = terminalManager.sessions[selectedTab]
+            let session = terminalManager.activeSession(at: selectedTab)
             let title = terminalManager.getTabMetadata(for: session.id).name
             if session.startRecording(title: title) != nil {
                 ToastManager.shared.show("Recording \(title)", type: .success)
@@ -310,7 +338,7 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .proTermStopRecording)) { _ in
             guard terminalManager.sessions.indices.contains(selectedTab),
-                  let url = terminalManager.sessions[selectedTab].stopRecording() else { return }
+                  let url = terminalManager.activeSession(at: selectedTab).stopRecording() else { return }
             ToastManager.shared.show("Saved \(url.lastPathComponent)", type: .success)
         }
         .onReceive(NotificationCenter.default.publisher(for: .proTermPlayRecording)) { _ in
@@ -324,7 +352,7 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: SessionExporter.shareNotification)) { _ in
             guard terminalManager.sessions.indices.contains(selectedTab) else { return }
-            SessionExporter.share(terminalManager.sessions[selectedTab])
+            SessionExporter.share(terminalManager.activeSession(at: selectedTab))
         }
         .keyboardShortcuts(keyboardShortcutsManager)
         // MARK: – Drag‑and‑drop support (read‑only tabs)
@@ -344,13 +372,24 @@ struct ContentView: View {
         }
     }
     
+    /// After the pane layout or active pane changes, move keyboard focus to the active pane's field.
+    @MainActor
+    private func focusActivePane() {
+        guard terminalManager.sessions.indices.contains(selectedTab) else { return }
+        let id = terminalManager.activeSession(at: selectedTab).id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            NotificationCenter.default.post(name: .focusCommandInput, object: id)
+            focusCurrentSession(reason: .manual)
+        }
+    }
+    
     @MainActor
     private func focusCurrentSession(reason: CommandInputFocusController.FocusReason) {
         guard terminalManager.sessions.indices.contains(selectedTab) else {
             focusController.clearActiveSession()
             return
         }
-        let sessionID = terminalManager.sessions[selectedTab].id
+        let sessionID = terminalManager.activeSession(at: selectedTab).id
         focusController.setActiveSession(sessionID)
         focusController.requestFocus(for: sessionID, reason: reason)
     }
@@ -370,7 +409,7 @@ struct ContentView: View {
         keyboardShortcutsManager.onClearScreen = {
             // Clear current terminal
             if terminalManager.sessions.indices.contains(selectedTab) {
-                terminalManager.sessions[selectedTab].clearOutput()
+                terminalManager.activeSession(at: selectedTab).clearOutput()
             }
         }
         
@@ -405,7 +444,7 @@ struct ContentView: View {
         keyboardShortcutsManager.onCopy = {
             // Copy terminal output
             if terminalManager.sessions.indices.contains(selectedTab) {
-                let session = terminalManager.sessions[selectedTab]
+                let session = terminalManager.activeSession(at: selectedTab)
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(session.output, forType: .string)
             }
@@ -682,10 +721,22 @@ struct CommandPaletteView: View {
             category: "Terminal"
         ) {
             if terminalManager.sessions.indices.contains(selectedTab) {
-                terminalManager.sessions[selectedTab].clearOutput()
+                terminalManager.activeSession(at: selectedTab).clearOutput()
                 ToastManager.shared.show("Screen cleared", type: .info)
             }
         })
+        
+        // Panes
+        for (title, icon, name, info) in [
+            ("Split Pane Right", "rectangle.split.2x1", Notification.Name.proTermSplitPane, [String: Any]()),
+            ("Split Pane Down", "rectangle.split.1x2", .proTermSplitPane, ["vertical": true]),
+            ("Close Pane", "rectangle.badge.xmark", .proTermClosePane, [:]),
+            ("Next Pane", "arrow.right.square", .proTermCyclePane, [:])
+        ] as [(String, String, Notification.Name, [String: Any])] {
+            commands.append(CommandItem(title: title, subtitle: nil, icon: icon, category: "Panes") {
+                NotificationCenter.default.post(name: name, object: nil, userInfo: info)
+            })
+        }
         
         // Recording and folding
         for (title, subtitle, icon, name) in [
@@ -701,12 +752,12 @@ struct CommandPaletteView: View {
             title: "Collapse All Command Output", subtitle: "Needs Collapsible command output enabled in Preferences > Filters",
             icon: "chevron.down.square", category: "View"
         ) {
-            if terminalManager.sessions.indices.contains(selectedTab) { terminalManager.sessions[selectedTab].collapseAllSections() }
+            if terminalManager.sessions.indices.contains(selectedTab) { terminalManager.activeSession(at: selectedTab).collapseAllSections() }
         })
         commands.append(CommandItem(
             title: "Expand All Command Output", subtitle: nil, icon: "chevron.up.square", category: "View"
         ) {
-            if terminalManager.sessions.indices.contains(selectedTab) { terminalManager.sessions[selectedTab].expandAllSections() }
+            if terminalManager.sessions.indices.contains(selectedTab) { terminalManager.activeSession(at: selectedTab).expandAllSections() }
         })
         
         // Workspaces
@@ -747,7 +798,7 @@ struct CommandPaletteView: View {
                 category: "Quick Commands"
             ) {
                 if terminalManager.sessions.indices.contains(selectedTab) {
-                    let session = terminalManager.sessions[selectedTab]
+                    let session = terminalManager.activeSession(at: selectedTab)
                     session.runCommand(quickCommand.command)
                     productivityTools.recordQuickCommandUsage(quickCommand.id)
                 }
@@ -763,7 +814,7 @@ struct CommandPaletteView: View {
                 category: "Aliases"
             ) {
                 if terminalManager.sessions.indices.contains(selectedTab) {
-                    terminalManager.sessions[selectedTab].runCommand(command)
+                    terminalManager.activeSession(at: selectedTab).runCommand(command)
                 }
             })
         }
@@ -870,7 +921,7 @@ struct CommandPaletteView: View {
                 category: shellCmd.category
             ) {
                 if terminalManager.sessions.indices.contains(selectedTab) {
-                    let session = terminalManager.sessions[selectedTab]
+                    let session = terminalManager.activeSession(at: selectedTab)
                     session.runCommand(shellCmd.command)
                 }
             })

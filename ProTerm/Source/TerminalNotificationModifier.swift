@@ -14,6 +14,7 @@ struct TerminalNotificationModifier: ViewModifier {
   let updateCachedAttributedOutput: () -> Void
   let applyPaste: (String) -> Void
   let applyRedo: () -> Void
+  let isActivePane: () -> Bool
   let forceFocus: (CommandInputFocusController.FocusReason) -> Void
   let showSystemInfo: () -> Void
   let presentHistoryIfNeeded: () -> Void
@@ -68,7 +69,8 @@ struct TerminalNotificationModifier: ViewModifier {
       }
       .onReceive(NotificationCenter.default.publisher(for: .focusCommandInput)) { note in
         let targetId = note.object as? UUID
-        if (targetId == session.id) || (targetId == nil) {
+        // A broadcast (nil target) only reaches the focused pane of a split.
+        if (targetId == session.id) || (targetId == nil && isActivePane()) {
           if !showPasswordInput {
             forceFocus(.notification)
           }
