@@ -35,6 +35,8 @@ struct ContentView: View {
         case closeSessionsToRight
     }
 
+    private static let workspaceMinWidth: CGFloat = 360
+
     private var focusController: CommandInputFocusController { CommandInputFocusController.shared }
 
     var body: some View {
@@ -48,8 +50,11 @@ struct ContentView: View {
                 .padding(.leading, 12)
             }
             terminalWorkspace
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: Self.workspaceMinWidth, maxWidth: .infinity, maxHeight: .infinity)
         }
+        // Reserve room for the sidebar so the window can't shrink below the workspace's minimum;
+        // otherwise the HStack overflows and clips the sidebar's leading edge and the toolbar's trailing edge.
+        .frame(minWidth: showQuickCommands ? Self.workspaceMinWidth + quickCommandsPanelWidth + 12 : Self.workspaceMinWidth)
     }
 
     private var terminalWorkspace: some View {

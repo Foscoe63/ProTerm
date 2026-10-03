@@ -54,7 +54,7 @@ struct ProTermApp: App {
                 .environmentObject(integrationFeatures)
                 .environmentObject(terminalVisualSettings)
                 .environmentObject(aiManager)
-                .frame(minWidth: 800, minHeight: 600)
+                .frame(minWidth: 520, minHeight: 600)
         }
         // ------------------------------------------------------------
         // ❌ Removed the built‑in Settings scene – it was creating the

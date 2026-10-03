@@ -1572,13 +1572,8 @@ struct TerminalView: View {
   }
 
   private func calculateCommandInputLineNumber() -> Int {
-    let raw = session.output
-    if raw.isEmpty { return 1 }
-    
-    // The input area should show the line number of the LAST line if it's a partial line
-    // Or the NEXT line if the output ends in a newline.
-    let lines = raw.components(separatedBy: .newlines)
-    return max(1, lines.count)
+    // The prompt sits on the row after the displayed body, so number it from the same text the gutter counts.
+    LineNumbersView.lineCount(of: String(calculateOutputSplit().body.characters)) + 1
   }
 
   // Splits the output into a main body and a trailing partial line (the prompt)
@@ -1591,9 +1586,12 @@ struct TerminalView: View {
         // Map the string index to AttributedString index
         let offset = raw.distance(from: raw.startIndex, to: lastNewlineRange.upperBound)
         let splitIndex = full.characters.index(full.startIndex, offsetBy: offset)
+        // Exclude the separating newline from the body: Text renders a trailing "\n" as an extra blank row,
+        // which would push the prompt a row below the last numbered line.
+        let bodyEnd = full.characters.index(before: splitIndex)
         
         // Slicing AttributedString returns a slice; convert back to AttributedString for use
-        let body = AttributedString(full[..<splitIndex])
+        let body = AttributedString(full[..<bodyEnd])
         let prompt = AttributedString(full[splitIndex...])
         return (body, prompt)
     } else if !raw.isEmpty {
@@ -2400,26 +2398,16 @@ struct LineNumbersView: View {
       .multilineTextAlignment(.trailing)
   }
 
-  private func lineNumbersString() -> String {
-    let raw = String(attributedText.characters)
-    if raw.isEmpty { return "" }
+  /// Number of rows `Text` renders for `raw`: one per "\n"-separated segment.
+  static func lineCount(of raw: String) -> Int {
+    if raw.isEmpty { return 0 }
+    return raw.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n").count
+  }
 
-    // Normalize only CRLF to LF, keep CRLF as one newline
-    let normalized = raw.replacingOccurrences(of: "\r\n", with: "\n")
-    
-    // Split into components to find total count
-    let segments = normalized.components(separatedBy: "\n")
-    
-    // In our split view, the 'split.body' is the portion *before* the last line.
-    // However, split.body could itself end in a newline.
-    // If it ends in \n, components() gives an extra trailing empty string.
-    let count = normalized.hasSuffix("\n") ? max(0, segments.count - 1) : segments.count
-    
+  private func lineNumbersString() -> String {
+    let count = Self.lineCount(of: String(attributedText.characters))
     if count <= 0 { return "" }
-    
-    return (1...count)
-      .map { "\($0)" }
-      .joined(separator: "\n")
+    return (1...count).map { "\($0)" }.joined(separator: "\n")
   }
 }
 

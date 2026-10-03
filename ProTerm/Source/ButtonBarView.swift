@@ -26,8 +26,11 @@ struct ButtonBarView: View {
     @Environment(\.dismiss) private var dismiss   // not used here, kept for completeness
 
     var body: some View {
-        toolbarContent
-            .padding(.horizontal, 4)
+        ScrollView(.horizontal, showsIndicators: false) {
+            toolbarContent
+                .padding(.horizontal, 4)
+        }
+            .padding(.horizontal, 0)
             .padding(.vertical, 4)
             .preferencesWindow(isPresented: $showingPreferences) {
                 preferencesContent
