@@ -63,6 +63,7 @@ struct TerminalView: View {
 
   // Auto-completion state
   @State private var currentCompletions: [String] = []
+  @State private var completionHead: String = ""
   @State private var currentCompletionIndex: Int = 0
   @State private var lastCompletionInput: String = ""
 
@@ -495,6 +496,14 @@ struct TerminalView: View {
       }
     }
     .onChange(of: searchQuery) { _, _ in
+      updateCachedAttributedOutput()
+    }
+    .onChange(of: productivityTools.outputFilters.map { "\($0.id)\($0.pattern)\($0.action)\($0.isEnabled)\($0.color)\($0.replacement ?? "")\($0.isRegex)" }) { _, _ in
+      lastProcessedOutput = "\u{0}invalidated"
+      updateCachedAttributedOutput()
+    }
+    .onChange(of: productivityTools.colorCodeOutput) { _, _ in
+      lastProcessedOutput = "\u{0}invalidated"
       updateCachedAttributedOutput()
     }
     .onChange(of: fontManager.fontName) { _, _ in
@@ -1561,6 +1570,10 @@ struct TerminalView: View {
     }
     
     var attributed = ANSIParser.parse(sessionOutput, baseFont: fontManager.font)
+    attributed = OutputStyler.apply(
+      rules: OutputStyler.compile(productivityTools.outputFilters),
+      colorCode: productivityTools.colorCodeOutput,
+      to: attributed)
     let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
 
     if !q.isEmpty {
@@ -2080,36 +2093,22 @@ struct TerminalView: View {
   private func handleTabCompletion() {
     let input = commandInput.trimmingCharacters(in: .whitespaces)
 
-    // Get completions if we don't have them or input changed
-    if currentCompletions.isEmpty || input != lastCompletionInput {
-      currentCompletions = advancedFeatures.getCompletions(for: input, in: session)
+    // Recompute unless the input is exactly what the previous Tab inserted (then keep cycling).
+    if currentCompletions.isEmpty || commandInput != lastCompletionInput {
+      let result = advancedFeatures.completions(for: commandInput, in: session)
+      currentCompletions = result.candidates
+      completionHead = result.head
       currentCompletionIndex = 0
-      lastCompletionInput = input
 
       if currentCompletions.isEmpty {
         return  // No completions available
       }
     }
 
-    // If we have completions, use the current one
+    // Insert the current candidate in place of the last word, then cycle on the next Tab.
     if !currentCompletions.isEmpty {
-      let completion = currentCompletions[currentCompletionIndex]
-
-      // Find the last word in the input to replace
-      let components = input.components(separatedBy: .whitespaces)
-      if let lastWord = components.last, !lastWord.isEmpty {
-        // Replace the last word with the completion
-        let prefix = components.dropLast().joined(separator: " ")
-        if prefix.isEmpty {
-          commandInput = completion
-        } else {
-          commandInput = "\(prefix) \(completion)"
-        }
-      } else {
-        commandInput = completion
-      }
-
-      // Cycle to next completion for next Tab press
+      commandInput = completionHead + currentCompletions[currentCompletionIndex]
+      lastCompletionInput = commandInput
       currentCompletionIndex = (currentCompletionIndex + 1) % currentCompletions.count
     }
   }

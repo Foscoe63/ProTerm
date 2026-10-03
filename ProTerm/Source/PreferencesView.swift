@@ -24,6 +24,7 @@ struct PreferencesView: View {
         case prompt        = "Prompt"
         case quickCommands = "Quick Commands"
         case templates     = "Templates"
+        case filters       = "Filters"
         case ssh           = "SSH"
         case ai            = "AI"
     }
@@ -116,6 +117,8 @@ struct PreferencesView: View {
                         QuickCommandsSettings()
                     case .templates:
                         TemplateSettings()
+                    case .filters:
+                        FilterSettings()
                     case .ssh:
                         SSHConnectionSettings()
                     case .ai:
@@ -2368,5 +2371,86 @@ struct TemplateSettings: View {
 
     private func reset() {
         editingId = nil; name = ""; directory = ""; commands = ""; environment = ""
+    }
+}
+
+// MARK: - Output Filter Settings
+struct FilterSettings: View {
+    @EnvironmentObject var productivityTools: ProductivityTools
+    @State private var name = ""
+    @State private var pattern = ""
+    @State private var isRegex = false
+    @State private var action: ProductivityTools.OutputFilter.FilterAction = .highlight
+    @State private var color = Color.yellow
+    @State private var replacement = ""
+
+    private var patternError: String? {
+        guard isRegex, !pattern.isEmpty else { return nil }
+        return (try? NSRegularExpression(pattern: pattern)) == nil ? "Invalid regular expression" : nil
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Output Filters & Color Coding").font(.title2).fontWeight(.bold)
+
+                Toggle("Color-code errors, warnings and successes", isOn: $productivityTools.colorCodeOutput)
+                Text("Colors keywords like error / warning / passed. Colors set by the program itself are left alone.")
+                    .font(.caption).foregroundColor(.secondary)
+
+                Divider()
+                Text("Filters apply to display only; the underlying output and exports are unchanged. Hide, Extract and Replace work on whole lines that have finished, never on the live prompt.")
+                    .font(.caption).foregroundColor(.secondary)
+
+                ForEach(productivityTools.outputFilters) { filter in
+                    HStack {
+                        Toggle("", isOn: Binding(
+                            get: { filter.isEnabled },
+                            set: { _ in productivityTools.toggleFilter(filter) }
+                        )).labelsHidden()
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(filter.name).font(.headline)
+                            Text("\(filter.action.rawValue): \(filter.pattern)\(filter.isRegex ? "  (regex)" : "")")
+                                .font(.system(.caption, design: .monospaced)).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Delete", role: .destructive) { productivityTools.removeOutputFilter(filter) }
+                    }
+                    .padding(8)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(6)
+                }
+
+                Divider()
+                Text("New Filter").font(.headline)
+                TextField("Name", text: $name).textFieldStyle(.roundedBorder)
+                TextField("Text or pattern to match", text: $pattern).textFieldStyle(.roundedBorder)
+                if let patternError { Text(patternError).font(.caption).foregroundColor(.red) }
+                Toggle("Regular expression", isOn: $isRegex)
+                Picker("Action", selection: $action) {
+                    ForEach(ProductivityTools.OutputFilter.FilterAction.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                if action == .highlight { ColorPicker("Highlight color", selection: $color) }
+                if action == .replace {
+                    TextField(isRegex ? "Replacement (use $1 for groups)" : "Replacement", text: $replacement)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Button("Add Filter") {
+                    productivityTools.addOutputFilter(
+                        name: name.isEmpty ? pattern : name, pattern: pattern, isRegex: isRegex,
+                        action: action, color: hexString(color),
+                        replacement: action == .replace ? replacement : nil)
+                    name = ""; pattern = ""; replacement = ""
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(pattern.isEmpty || patternError != nil)
+            }
+        }
+    }
+
+    private func hexString(_ color: Color) -> String {
+        let ns = NSColor(color).usingColorSpace(.sRGB) ?? .yellow
+        return String(format: "#%02X%02X%02X", Int(ns.redComponent * 255), Int(ns.greenComponent * 255), Int(ns.blueComponent * 255))
     }
 }

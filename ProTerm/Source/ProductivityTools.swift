@@ -114,7 +114,10 @@ class ProductivityTools: NSObject, ObservableObject {
     
     // MARK: - Output Filtering
     @Published var outputFilters: [OutputFilter] = []
-    @Published var activeFilters: Set<UUID> = []
+    /// Built-in coloring of error / warning / success keywords in output.
+    @Published var colorCodeOutput: Bool = UserDefaults.standard.bool(forKey: "ProTermColorCodeOutput") {
+        didSet { UserDefaults.standard.set(colorCodeOutput, forKey: "ProTermColorCodeOutput") }
+    }
     private let outputFiltersKey = "ProTermOutputFilters"
     
     struct OutputFilter: Identifiable, Codable {
@@ -124,6 +127,7 @@ class ProductivityTools: NSObject, ObservableObject {
         var isRegex: Bool
         var action: FilterAction
         var color: String // Hex color
+        var replacement: String? // Used by .replace; supports $1 groups when isRegex
         var isEnabled: Bool
         
         enum FilterAction: String, CaseIterable, Codable {
@@ -384,7 +388,7 @@ class ProductivityTools: NSObject, ObservableObject {
     
     // MARK: - Output Filters Management
     
-    func addOutputFilter(name: String, pattern: String, isRegex: Bool = false, action: OutputFilter.FilterAction = .highlight, color: String = "#FFD700", isEnabled: Bool = true) {
+    func addOutputFilter(name: String, pattern: String, isRegex: Bool = false, action: OutputFilter.FilterAction = .highlight, color: String = "#FFD700", replacement: String? = nil, isEnabled: Bool = true) {
         let filter = OutputFilter(
             id: UUID(),
             name: name,
@@ -392,6 +396,7 @@ class ProductivityTools: NSObject, ObservableObject {
             isRegex: isRegex,
             action: action,
             color: color,
+            replacement: replacement,
             isEnabled: isEnabled
         )
         outputFilters.append(filter)
@@ -400,7 +405,6 @@ class ProductivityTools: NSObject, ObservableObject {
     
     func removeOutputFilter(_ filter: OutputFilter) {
         outputFilters.removeAll { $0.id == filter.id }
-        activeFilters.remove(filter.id)
         saveOutputFilters()
     }
     
@@ -412,60 +416,9 @@ class ProductivityTools: NSObject, ObservableObject {
     }
     
     func toggleFilter(_ filter: OutputFilter) {
-        if activeFilters.contains(filter.id) {
-            activeFilters.remove(filter.id)
-        } else {
-            activeFilters.insert(filter.id)
-        }
-    }
-    
-    func applyFilters(to text: String) -> String {
-        var result = text
-        
-        for filter in outputFilters {
-            guard activeFilters.contains(filter.id) && filter.isEnabled else { continue }
-            
-            switch filter.action {
-            case .highlight:
-                // Highlight matching text (simplified)
-                if filter.isRegex {
-                    // Apply regex highlighting
-                } else {
-                    // Apply simple string highlighting
-                }
-            case .hide:
-                // Hide matching text
-                if filter.isRegex {
-                    if let regex = try? NSRegularExpression(pattern: filter.pattern) {
-                        result = regex.stringByReplacingMatches(in: result, options: [], range: NSRange(location: 0, length: result.count), withTemplate: "")
-                    }
-                } else {
-                    result = result.replacingOccurrences(of: filter.pattern, with: "")
-                }
-            case .replace:
-                // Replace matching text
-                if filter.isRegex {
-                    if let regex = try? NSRegularExpression(pattern: filter.pattern) {
-                        result = regex.stringByReplacingMatches(in: result, options: [], range: NSRange(location: 0, length: result.count), withTemplate: "")
-                    }
-                } else {
-                    result = result.replacingOccurrences(of: filter.pattern, with: "")
-                }
-            case .extract:
-                // Extract matching text (simplified)
-                if filter.isRegex {
-                    if let regex = try? NSRegularExpression(pattern: filter.pattern) {
-                        let matches = regex.matches(in: result, options: [], range: NSRange(location: 0, length: result.count))
-                        let extracted = matches.compactMap { match in
-                            String(result[Range(match.range, in: result)!])
-                        }.joined(separator: "\n")
-                        result = extracted
-                    }
-                }
-            }
-        }
-        
-        return result
+        guard let index = outputFilters.firstIndex(where: { $0.id == filter.id }) else { return }
+        outputFilters[index].isEnabled.toggle()
+        saveOutputFilters()
     }
     
     private func loadOutputFilters() {

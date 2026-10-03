@@ -166,52 +166,14 @@ class AdvancedFeatures: NSObject, ObservableObject {
     
     // MARK: - Auto-completion
     
-    func getCompletions(for input: String, in session: TerminalSession) -> [String] {
-        let trimmedInput = input.trimmingCharacters(in: .whitespaces)
-        guard !trimmedInput.isEmpty else { return [] }
-        
-        var completions: [String] = []
-        
-        // Command completions
-        let commands = ["ls", "cd", "pwd", "mkdir", "rmdir", "rm", "cp", "mv", "cat", "grep", "find", "chmod", "chown", "sudo", "npm", "git", "docker", "kubectl", "aws", "terraform", "make", "cmake", "gcc", "clang", "python", "node", "java", "go", "rust", "cargo", "yarn", "brew", "apt", "yum", "dnf", "pacman", "zypper", "port", "fink", "macports"]
-        
-        for command in commands {
-            if command.hasPrefix(trimmedInput) {
-                completions.append(command)
-            }
-        }
-        
-        // File and directory completions
-        let fileManager = FileManager.default
-        let currentPath = session.cwd.path
-        
-        do {
-            let contents = try fileManager.contentsOfDirectory(atPath: currentPath)
-            for item in contents {
-                if item.hasPrefix(trimmedInput) {
-                    let fullPath = "\(currentPath)/\(item)"
-                    var isDirectory: ObjCBool = false
-                    if fileManager.fileExists(atPath: fullPath, isDirectory: &isDirectory) {
-                        if isDirectory.boolValue {
-                            completions.append("\(item)/")
-                        } else {
-                            completions.append(item)
-                        }
-                    }
-                }
-            }
-        } catch {
-            // Handle error silently
-        }
-        
-        // Alias completions
-        for (alias, _) in aliases {
-            if alias.hasPrefix(trimmedInput) {
-                completions.append(alias)
-            }
-        }
-        
-        return completions.sorted()
+    func completions(for line: String, in session: TerminalSession) -> CompletionEngine.Result {
+        CompletionEngine.complete(
+            line: line,
+            cwd: session.cwd,
+            history: session.commandHistory,
+            aliases: Array(aliases.keys),
+            executables: CompletionEngine.pathExecutables(),
+            isRemote: session.isSSHSession)
     }
     
     func nextCompletion() -> String? {
