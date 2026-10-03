@@ -16,8 +16,8 @@ struct PaneTreeView: View {
         switch node {
         case .leaf(let sessionID):
             PaneLeafView(sessionID: sessionID, tabID: tabID)
-        case .split(_, let axis, let first, let second):
-            PaneSplitView(axis: axis, tabID: tabID, first: first, second: second)
+        case .split(let id, let axis, let first, let second):
+            PaneSplitView(splitID: id, axis: axis, tabID: tabID, first: first, second: second)
         }
     }
 }
@@ -52,13 +52,15 @@ private struct PaneLeafView: View {
 }
 
 private struct PaneSplitView: View {
+    let splitID: UUID
     let axis: PaneAxis
     let tabID: UUID
     let first: PaneNode
     let second: PaneNode
 
-    @State private var ratio: CGFloat = 0.5
+    @EnvironmentObject private var terminalManager: TerminalManager
     @State private var dragStartRatio: CGFloat?
+    private var ratio: CGFloat { CGFloat(terminalManager.paneRatio(for: splitID)) }
     private let dividerThickness: CGFloat = 6
 
     var body: some View {
@@ -102,9 +104,12 @@ private struct PaneSplitView: View {
                         let start = dragStartRatio ?? ratio
                         dragStartRatio = start
                         let delta = axis == .horizontal ? value.translation.width : value.translation.height
-                        ratio = min(0.85, max(0.15, start + delta / total))
+                        terminalManager.setPaneRatio(Double(start + delta / total), for: splitID)
                     }
-                    .onEnded { _ in dragStartRatio = nil }
+                    .onEnded { _ in
+                        dragStartRatio = nil
+                        terminalManager.commitPaneRatios()
+                    }
             )
     }
 }

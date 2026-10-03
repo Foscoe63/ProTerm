@@ -26,6 +26,8 @@ final class TerminalManager: ObservableObject {
     private var paneSessions: [UUID: TerminalSession] = [:]
     /// Every session in a split (including the tab's own) -> the tab ID that owns it.
     private var paneOwner: [UUID: UUID] = [:]
+    /// Divider position (0...1, first pane's share) per split node.
+    @Published private(set) var paneRatios: [UUID: Double] = [:]
     static let maxPanesPerTab = 6
     
     /// Tab metadata (names, colors) indexed by session ID
@@ -96,11 +98,14 @@ final class TerminalManager: ObservableObject {
                         directory = URL(fileURLWithPath: path)
                     }
                 }
-                addSession(
+                let tab = addSession(
                     initialCWD: directory,
                     name: snapshot.title,
                     color: snapshot.color.flatMap { TabColor(rawValue: $0) } ?? .default
                 )
+                if let panes = snapshot.panes {
+                    restorePanes(of: tab, from: panes, activeIndex: snapshot.activePaneIndex)
+                }
             }
         }
         isRestoring = false
@@ -117,12 +122,24 @@ final class TerminalManager: ObservableObject {
         guard !isRestoring else { return }
         let snapshots = sessions.map { session -> SessionSnapshot in
             let meta = tabMetadata[session.id]
-            return SessionSnapshot(
+            var snapshot = SessionSnapshot(
                 id: session.id,
                 title: meta?.name ?? "Session",
                 cwd: session.isSSHSession ? nil : session.cwd.path,
                 color: meta?.color.rawValue
             )
+            if let layout = paneLayouts[session.id] {
+                snapshot.panes = layout.snapshot(
+                    primary: session.id,
+                    cwd: { [unowned self] id in
+                        guard let pane = self.session(forPane: id), !pane.isSSHSession else { return nil }
+                        return pane.cwd.path
+                    },
+                    ratio: { [unowned self] in self.paneRatios[$0] ?? 0.5 })
+                let leaves = layout.leafIDs
+                snapshot.activePaneIndex = activePane[session.id].flatMap { leaves.firstIndex(of: $0) }
+            }
+            return snapshot
         }
         SessionPersistence.shared.save(snapshots: snapshots)
     }
@@ -150,6 +167,57 @@ final class TerminalManager: ObservableObject {
     func setActivePane(_ sessionID: UUID) {
         guard let tab = paneOwner[sessionID], activePane[tab] != sessionID else { return }
         activePane[tab] = sessionID
+        persistSnapshot()
+    }
+    
+    func paneRatio(for splitID: UUID) -> Double { paneRatios[splitID] ?? 0.5 }
+    
+    /// Called continuously while dragging a divider; `commitPaneRatios` saves once the drag ends.
+    func setPaneRatio(_ ratio: Double, for splitID: UUID) {
+        paneRatios[splitID] = min(0.85, max(0.15, ratio))
+    }
+    
+    func commitPaneRatios() { persistSnapshot() }
+    
+    /// Rebuilds a saved split: the tab's own session stays the primary pane and every other leaf gets a
+    /// fresh shell in its saved folder. Invalid snapshots are ignored.
+    private func restorePanes(of tab: TerminalSession, from snapshot: PaneSnapshot, activeIndex: Int?) {
+        guard snapshot.isValid(maxPanes: Self.maxPanesPerTab) else { return }
+        var created: [TerminalSession] = []
+        var ratios: [UUID: Double] = [:]
+        func build(_ node: PaneSnapshot) -> PaneNode {
+            switch node {
+            case .leaf(let cwd, let primary):
+                if primary { return .leaf(tab.id) }
+                var directory = FileManager.default.homeDirectoryForCurrentUser
+                var isDir: ObjCBool = false
+                if let cwd, FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue {
+                    directory = URL(fileURLWithPath: cwd)
+                }
+                let session = TerminalSession(shellManager: shellManager ?? ShellManager(), initialCWD: directory)
+                created.append(session)
+                return .leaf(session.id)
+            case .split(let vertical, let ratio, let first, let second):
+                let id = UUID()
+                ratios[id] = min(0.85, max(0.15, ratio))
+                return .split(id: id, axis: vertical ? .vertical : .horizontal, first: build(first), second: build(second))
+            }
+        }
+        let layout = build(snapshot)
+        for session in created {
+            paneSessions[session.id] = session
+            paneOwner[session.id] = tab.id
+        }
+        paneOwner[tab.id] = tab.id
+        paneRatios.merge(ratios) { _, new in new }
+        paneLayouts[tab.id] = layout
+        let leaves = layout.leafIDs
+        activePane[tab.id] = activeIndex.flatMap { leaves.indices.contains($0) ? leaves[$0] : nil } ?? tab.id
+    }
+    
+    private func prunePaneRatios() {
+        let live = Set(paneLayouts.values.flatMap(\.splitIDs))
+        for id in paneRatios.keys where !live.contains(id) { paneRatios.removeValue(forKey: id) }
     }
     
     @discardableResult
@@ -167,6 +235,7 @@ final class TerminalManager: ObservableObject {
         paneOwner[session.id] = tab.id
         paneLayouts[tab.id] = layout.splitting(leaf: active.id, axis: axis, newLeaf: session.id)
         activePane[tab.id] = session.id
+        persistSnapshot()
         return session
     }
     
@@ -188,6 +257,8 @@ final class TerminalManager: ObservableObject {
             paneLayouts[tab.id] = remaining
             activePane[tab.id] = remaining.leafIDs.first
         }
+        prunePaneRatios()
+        persistSnapshot()
         return true
     }
     
@@ -198,6 +269,7 @@ final class TerminalManager: ObservableObject {
         let current = ids.firstIndex(of: activeSession(at: index).id) ?? 0
         let next = (current + (forward ? 1 : ids.count - 1)) % ids.count
         activePane[sessions[index].id] = ids[next]
+        persistSnapshot()
     }
     
     /// Tears down pane sessions whose tab no longer exists (tab closed by any path).
@@ -214,6 +286,7 @@ final class TerminalManager: ObservableObject {
             paneLayouts.removeValue(forKey: tabID)
             activePane.removeValue(forKey: tabID)
         }
+        prunePaneRatios()
     }
     
     private func terminate(_ session: TerminalSession) {

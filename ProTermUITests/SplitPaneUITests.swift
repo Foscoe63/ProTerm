@@ -22,7 +22,7 @@ final class SplitPaneUITests: XCTestCase {
 
     func testSplitCreatesSecondPaneAndFocusMovesToIt() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-ProTermUITesting"]
+        app.launchArguments = ["-ProTermUITesting", "-ProTermUITestingReset"]
         app.launch()
         defer { app.terminate() }
 
@@ -52,5 +52,32 @@ final class SplitPaneUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
         app.typeText("LEFT")
         XCTAssertTrue(((leftField.value as? String) ?? "").contains("LEFT"), "click should focus the left pane's field")
+    }
+
+    func testSplitLayoutAndActivePaneSurviveRelaunch() throws {
+        var app = XCUIApplication()
+        app.launchArguments = ["-ProTermUITesting", "-ProTermUITestingReset"]
+        app.launch()
+        XCTAssertTrue(waitFor { self.commandFields(app).count == 1 }, "expected a single pane on a fresh start")
+
+        app.typeKey("d", modifierFlags: .command)
+        XCTAssertTrue(waitFor { self.commandFields(app).count == 2 }, "split did not add a pane")
+        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+        app.terminate()
+
+        app = XCUIApplication()
+        app.launchArguments = ["-ProTermUITesting"]  // no reset: keep the saved file
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(waitFor { self.commandFields(app).count == 2 }, "split layout was not restored")
+
+        // The right-hand (new) pane was active when we quit, so it should receive typing.
+        RunLoop.current.run(until: Date().addingTimeInterval(2.0))
+        app.typeText("RESTORED")
+        let fields = commandFields(app)
+        let all = (0..<fields.count).map { fields.element(boundBy: $0) }
+        let typed = all.first { (($0.value as? String) ?? "").contains("RESTORED") }
+        XCTAssertNotNil(typed, "typing went nowhere")
+        XCTAssertEqual(typed?.frame.minX, all.map { $0.frame.minX }.max(), "active pane should be the right-hand one")
     }
 }

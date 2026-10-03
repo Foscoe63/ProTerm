@@ -8,6 +8,10 @@ struct SessionSnapshot: Codable {
     var scrollPosition: Double = 0.0  // Scroll position as a ratio (0.0 = top, 1.0 = bottom)
     var cwd: String?
     var color: String?
+    /// Split layout of this tab, if it had one.
+    var panes: PaneSnapshot?
+    /// Index of the focused pane among the layout's leaves in reading order.
+    var activePaneIndex: Int?
 }
 
 final class SessionPersistence: @unchecked Sendable {
@@ -15,7 +19,11 @@ final class SessionPersistence: @unchecked Sendable {
     private let fileURL: URL = {
         // UI tests launch with this flag so they never touch the user's saved tabs.
         if ProcessInfo.processInfo.arguments.contains("-ProTermUITesting") {
-            return FileManager.default.temporaryDirectory.appendingPathComponent("proterm-uitest-sessions.json")
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("proterm-uitest-sessions.json")
+            if ProcessInfo.processInfo.arguments.contains("-ProTermUITestingReset") {
+                try? FileManager.default.removeItem(at: url)
+            }
+            return url
         }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let folder = dir.appendingPathComponent("ProTerm")
