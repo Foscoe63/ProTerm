@@ -38,4 +38,22 @@ final class LocalShellIntegrationTests: XCTestCase {
         let folded = CommandSections.fold(output, markers: [marker], collapsed: [marker.id])
         XCTAssertTrue(folded.contains("hidden"), "header should be found and body folded: \(folded.debugDescription)")
     }
+
+    func testRunningIndicatorOnlyWhileACommandRuns() async throws {
+        let session = TerminalSession(shellManager: ShellManager())
+        session.startLoginShellIfNeeded()
+        let ready = await waitUntil { session.hasActivePTY && session.canAcceptLoginShellInput }
+        try XCTSkipUnless(ready, "login shell did not start in this environment")
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+
+        XCTAssertTrue(session.isProcessRunning, "the shell itself is alive, which is what used to show 'Running'")
+        XCTAssertFalse(session.isForegroundCommandRunning, "idle shell must not count as running")
+
+        session.sendInput("sleep 4\n")
+        let busy = await waitUntil(timeout: 3) { session.isForegroundCommandRunning }
+        XCTAssertTrue(busy, "sleep should register as a running command")
+
+        let idleAgain = await waitUntil(timeout: 10) { !session.isForegroundCommandRunning }
+        XCTAssertTrue(idleAgain, "indicator should clear when the command finishes")
+    }
 }

@@ -2027,6 +2027,21 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     if commandMarkers.count > 2000 { commandMarkers.removeFirst(commandMarkers.count - 2000) }
   }
 
+  /// True only while a command is actually running. A login shell's PTY child (and an SSH connection)
+  /// is alive the whole time, so `isProcessRunning` alone says "running" forever. For a local shell the
+  /// foreground process group of the PTY differs from the shell's own while a command runs.
+  /// Not observable: callers poll (see `TimelineView` uses).
+  var isForegroundCommandRunning: Bool {
+    if isSSHSession { return false }
+    if isLoginShellActive && hasActivePTY {
+      guard masterFD >= 0, childPID > 0 else { return false }
+      let foreground = tcgetpgrp(masterFD)
+      let shellGroup = getpgid(childPID)
+      return foreground > 0 && shellGroup > 0 && foreground != shellGroup
+    }
+    return isProcessRunning
+  }
+
   func collapseAllSections() { collapsedSections = Set(commandMarkers.map(\.id)) }
   func expandAllSections() { collapsedSections = [] }
 

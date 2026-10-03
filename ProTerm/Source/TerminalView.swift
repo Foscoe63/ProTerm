@@ -948,28 +948,30 @@ struct TerminalView: View {
 
   @ViewBuilder
   private var processIndicatorOverlay: some View {
-    if session.isProcessRunning {
-      VStack {
-        HStack(spacing: 6) {
-          ProgressView()
-            .scaleEffect(0.7)
-            .frame(width: 14, height: 14)
-          Text("Running")
-            .font(.caption2)
-            .foregroundColor(.secondary)
+    // Polled: the foreground process group changes without any published property changing.
+    TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+      if session.isForegroundCommandRunning {
+        VStack {
+          HStack(spacing: 6) {
+            ProgressView()
+              .scaleEffect(0.7)
+              .frame(width: 14, height: 14)
+            Text("Running")
+              .font(.caption2)
+              .foregroundColor(.secondary)
+          }
+          .padding(.horizontal, 8)
+          .padding(.vertical, 4)
+          .background(
+            RoundedRectangle(cornerRadius: 6)
+              .fill(Color(NSColor.controlBackgroundColor).opacity(0.9))
+              .shadow(color: .black.opacity(0.1), radius: 2, x: 0, y: 1)
+          )
+          Spacer()
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-          RoundedRectangle(cornerRadius: 6)
-            .fill(Color(NSColor.controlBackgroundColor).opacity(0.9))
-            .shadow(color: .black.opacity(0.1), radius: 2, x: 0, y: 1)
-        )
-        Spacer()
+        .padding(.top, 8)
+        .padding(.trailing, 8)
       }
-      .padding(.top, 8)
-      .padding(.trailing, 8)
-      .transition(.opacity.combined(with: .scale))
     }
   }
 

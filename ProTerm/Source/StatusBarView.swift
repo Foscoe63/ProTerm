@@ -20,11 +20,7 @@ struct StatusBarView: View {
 
     /// True when a foreground command is running (not the idle login-shell PTY).
     private var showsBusyIndicator: Bool {
-        guard let session = currentSession else { return false }
-        if session.isLoginShellActive && session.hasActivePTY {
-            return false
-        }
-        return session.isProcessRunning
+        currentSession?.isForegroundCommandRunning ?? false
     }
 
     var body: some View {
@@ -72,6 +68,7 @@ struct StatusBarView: View {
             }
             
             // Process indicator (login shell stays "running" for the PTY child — show only for commands)
+            TimelineView(.periodic(from: .now, by: 0.5)) { _ in
             if showsBusyIndicator {
                 Divider()
                     .frame(height: 14)
@@ -96,6 +93,7 @@ struct StatusBarView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+            }
             }
             
             Spacer()
