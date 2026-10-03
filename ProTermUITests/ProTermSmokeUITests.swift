@@ -13,7 +13,7 @@ final class ProTermSmokeUITests: XCTestCase {
 
     func testAppLaunchesAndStaysRunning() {
         let app = XCUIApplication()
-        app.launchArguments = ["-ProTermUITesting"]
+        app.launchArguments = ["-ProTermUITesting", "-ApplePersistenceIgnoreState", "YES"]
         app.launch()
 
         XCTAssertEqual(app.state, .runningForeground, "ProTerm should reach the foreground after launch")

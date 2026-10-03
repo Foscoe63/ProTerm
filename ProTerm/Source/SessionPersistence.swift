@@ -15,21 +15,32 @@ struct SessionSnapshot: Codable {
 }
 
 final class SessionPersistence: @unchecked Sendable {
-    static let shared = SessionPersistence()
-    private let fileURL: URL = {
+    static let shared = SessionPersistence(fileURL: SessionPersistence.defaultFileURL())
+    private let fileURL: URL
+
+    init(fileURL: URL) {
+        self.fileURL = fileURL
+    }
+
+    private static func defaultFileURL() -> URL {
+        let arguments = ProcessInfo.processInfo.arguments
         // UI tests launch with this flag so they never touch the user's saved tabs.
-        if ProcessInfo.processInfo.arguments.contains("-ProTermUITesting") {
+        if arguments.contains("-ProTermUITesting") {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("proterm-uitest-sessions.json")
-            if ProcessInfo.processInfo.arguments.contains("-ProTermUITestingReset") {
+            if arguments.contains("-ProTermUITestingReset") {
                 try? FileManager.default.removeItem(at: url)
             }
             return url
+        }
+        // Unit tests run inside the app process; keep that instance away from the user's real file too.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            return FileManager.default.temporaryDirectory.appendingPathComponent("proterm-unittest-host-sessions.json")
         }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let folder = dir.appendingPathComponent("ProTerm")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder.appendingPathComponent("sessions.json")
-    }()
+    }
 
     func save(snapshots: [SessionSnapshot]) {
         if let data = try? JSONEncoder().encode(snapshots) {

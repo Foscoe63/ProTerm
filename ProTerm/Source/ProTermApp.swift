@@ -95,7 +95,7 @@ struct ProTermApp: App {
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
                 Button("Close Pane") { NotificationCenter.default.post(name: .proTermClosePane, object: nil) }
-                    .keyboardShortcut("w", modifiers: [.command, .option])
+                    .keyboardShortcut("w", modifiers: [.command, .control])
                 Button("Next Pane") { NotificationCenter.default.post(name: .proTermCyclePane, object: nil) }
                     .keyboardShortcut("]", modifiers: [.command])
                 Button("Previous Pane") {

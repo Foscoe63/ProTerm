@@ -48,9 +48,11 @@ final class TerminalManager: ObservableObject {
     private var titleObserver: NSObjectProtocol?
     private var willTerminateObserver: NSObjectProtocol?
     private var isRestoring = false
+    private let persistence: SessionPersistence
 
     /// Sessions are created once `setShellManager` runs (ContentView.onAppear / ProTermApp).
-    init() {
+    init(persistence: SessionPersistence = .shared) {
+        self.persistence = persistence
         titleObserver = NotificationCenter.default.addObserver(
             forName: .terminalTitleDidChange,
             object: nil,
@@ -86,7 +88,7 @@ final class TerminalManager: ObservableObject {
         guard !didBootstrapSessions, shellManager != nil else { return }
         didBootstrapSessions = true
         isRestoring = true
-        let snapshots = SessionPersistence.shared.load()
+        let snapshots = persistence.load()
         if snapshots.isEmpty {
             addSession()
         } else {
@@ -141,7 +143,7 @@ final class TerminalManager: ObservableObject {
             }
             return snapshot
         }
-        SessionPersistence.shared.save(snapshots: snapshots)
+        persistence.save(snapshots: snapshots)
     }
 
     // MARK: - Pane operations
@@ -239,26 +241,54 @@ final class TerminalManager: ObservableObject {
         return session
     }
     
-    /// Closes the focused pane. The tab's own (first) pane can't be closed this way; close the tab instead.
+    /// Closes the focused pane. Returns false if the tab isn't split.
+    ///
+    /// A tab is identified by its own session, so closing that first pane promotes a surviving pane's
+    /// session to be the tab (keeping the tab's position, name and color) instead of closing the tab.
     @discardableResult
     func closeActivePane(inTab index: Int) -> Bool {
         guard sessions.indices.contains(index) else { return false }
         let tab = sessions[index]
-        guard let layout = paneLayouts[tab.id], let active = activePane[tab.id], active != tab.id,
-              let remaining = layout.removing(leaf: active) else { return false }
-        if let session = paneSessions[active] { terminate(session) }
-        paneSessions.removeValue(forKey: active)
-        paneOwner.removeValue(forKey: active)
-        if remaining == .leaf(tab.id) {
-            paneLayouts.removeValue(forKey: tab.id)
-            activePane.removeValue(forKey: tab.id)
-            paneOwner.removeValue(forKey: tab.id)
+        guard let layout = paneLayouts[tab.id] else { return false }
+        let active = activePane[tab.id] ?? tab.id
+        guard let remaining = layout.removing(leaf: active), let survivorID = remaining.leafIDs.first else { return false }
+
+        if let session = session(forPane: active) { terminate(session) }
+
+        guard active == tab.id else {
+            paneSessions.removeValue(forKey: active)
+            paneOwner.removeValue(forKey: active)
+            if remaining == .leaf(tab.id) {
+                paneLayouts.removeValue(forKey: tab.id)
+                activePane.removeValue(forKey: tab.id)
+                paneOwner.removeValue(forKey: tab.id)
+            } else {
+                paneLayouts[tab.id] = remaining
+                activePane[tab.id] = survivorID
+            }
+            prunePaneRatios()
+            persistSnapshot()
+            return true
+        }
+
+        // The tab's own pane is closing: promote `survivorID` to be the tab's session.
+        guard let promoted = paneSessions[survivorID] else { return false }
+        paneSessions.removeValue(forKey: survivorID)
+        paneOwner.removeValue(forKey: tab.id)
+        paneLayouts.removeValue(forKey: tab.id)
+        activePane.removeValue(forKey: tab.id)
+        if let meta = tabMetadata[tab.id] { tabMetadata[survivorID] = meta }
+        tabMetadata.removeValue(forKey: tab.id)
+        if remaining == .leaf(survivorID) {
+            paneOwner.removeValue(forKey: survivorID)
         } else {
-            paneLayouts[tab.id] = remaining
-            activePane[tab.id] = remaining.leafIDs.first
+            for id in remaining.leafIDs { paneOwner[id] = survivorID }
+            paneLayouts[survivorID] = remaining
+            activePane[survivorID] = survivorID
         }
         prunePaneRatios()
-        persistSnapshot()
+        // Last, and only after the maps use the new key: this triggers persist + reconcilePanes.
+        sessions[index] = promoted
         return true
     }
     

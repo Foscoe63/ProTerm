@@ -318,7 +318,7 @@ struct ContentView: View {
             if terminalManager.closeActivePane(inTab: selectedTab) {
                 focusActivePane()
             } else {
-                ToastManager.shared.show("Only split panes can be closed here; use Close Tab for the first pane", type: .info)
+                ToastManager.shared.show("This tab has a single pane; use Close Tab to close it", type: .info)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .proTermCyclePane)) { note in
