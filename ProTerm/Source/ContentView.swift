@@ -11,6 +11,7 @@ struct ContentView: View {
 
     // The index of the currently‑selected session.
     @State private var selectedTab = 0
+    @State private var playbackItem: PlaybackItem?
 
     // Optional global search bar (kept from the original scaffold).
     @State private var searchQuery = ""
@@ -296,6 +297,30 @@ struct ContentView: View {
                   let raw = note.userInfo?["format"] as? String,
                   let format = ProductivityTools.ExportFormat(rawValue: raw) else { return }
             SessionExporter.export(terminalManager.sessions[selectedTab], format: format)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .proTermStartRecording)) { _ in
+            guard terminalManager.sessions.indices.contains(selectedTab) else { return }
+            let session = terminalManager.sessions[selectedTab]
+            let title = terminalManager.getTabMetadata(for: session.id).name
+            if session.startRecording(title: title) != nil {
+                ToastManager.shared.show("Recording \(title)", type: .success)
+            } else {
+                ToastManager.shared.show("Could not start recording", type: .error)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .proTermStopRecording)) { _ in
+            guard terminalManager.sessions.indices.contains(selectedTab),
+                  let url = terminalManager.sessions[selectedTab].stopRecording() else { return }
+            ToastManager.shared.show("Saved \(url.lastPathComponent)", type: .success)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .proTermPlayRecording)) { _ in
+            if let url = RecordingActions.chooseRecording() { playbackItem = PlaybackItem(url: url) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .proTermShowRecordings)) { _ in
+            NSWorkspace.shared.open(SessionRecorder.directory)
+        }
+        .sheet(item: $playbackItem) { item in
+            PlaybackSheet(url: item.url)
         }
         .onReceive(NotificationCenter.default.publisher(for: SessionExporter.shareNotification)) { _ in
             guard terminalManager.sessions.indices.contains(selectedTab) else { return }
@@ -660,6 +685,28 @@ struct CommandPaletteView: View {
                 terminalManager.sessions[selectedTab].clearOutput()
                 ToastManager.shared.show("Screen cleared", type: .info)
             }
+        })
+        
+        // Recording and folding
+        for (title, subtitle, icon, name) in [
+            ("Start Recording", "Record this tab's output to a .cast file", "record.circle", Notification.Name.proTermStartRecording),
+            ("Stop Recording", "Finish and save the recording", "stop.circle", .proTermStopRecording),
+            ("Play Recording…", "Open a .cast recording", "play.rectangle", .proTermPlayRecording)
+        ] {
+            commands.append(CommandItem(title: title, subtitle: subtitle, icon: icon, category: "Recording") {
+                NotificationCenter.default.post(name: name, object: nil)
+            })
+        }
+        commands.append(CommandItem(
+            title: "Collapse All Command Output", subtitle: "Needs Collapsible command output enabled in Preferences > Filters",
+            icon: "chevron.down.square", category: "View"
+        ) {
+            if terminalManager.sessions.indices.contains(selectedTab) { terminalManager.sessions[selectedTab].collapseAllSections() }
+        })
+        commands.append(CommandItem(
+            title: "Expand All Command Output", subtitle: nil, icon: "chevron.up.square", category: "View"
+        ) {
+            if terminalManager.sessions.indices.contains(selectedTab) { terminalManager.sessions[selectedTab].expandAllSections() }
         })
         
         // Session templates

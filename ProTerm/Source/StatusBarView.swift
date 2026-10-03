@@ -29,6 +29,7 @@ struct StatusBarView: View {
 
     var body: some View {
         HStack(spacing: 16) {
+            if let session = currentSession { RecordingBadge(session: session) }
             // Shell type
             HStack(spacing: 4) {
                 Image(systemName: "terminal")

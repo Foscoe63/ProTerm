@@ -85,6 +85,11 @@ struct ProTermApp: App {
                 Button("Share Session…") {
                     NotificationCenter.default.post(name: SessionExporter.shareNotification, object: nil)
                 }
+                Divider()
+                Button("Start Recording") { NotificationCenter.default.post(name: .proTermStartRecording, object: nil) }
+                Button("Stop Recording") { NotificationCenter.default.post(name: .proTermStopRecording, object: nil) }
+                Button("Play Recording…") { NotificationCenter.default.post(name: .proTermPlayRecording, object: nil) }
+                Button("Show Recordings in Finder") { NotificationCenter.default.post(name: .proTermShowRecordings, object: nil) }
             }
         }
     }
