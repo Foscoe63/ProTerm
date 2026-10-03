@@ -9,6 +9,9 @@ import SwiftUI
 @MainActor
 struct TerminalView: View {
   @ObservedObject var session: TerminalSession
+  @State private var scrollPosition = ScrollPosition()
+  @State private var scrollOffsetY: CGFloat = 0
+  @State private var scrollDistanceFromBottom: CGFloat = 0
   @State private var commandInput: String = ""
   @State private var passwordInput: String = ""
   @State private var showPasswordInput: Bool = false
@@ -367,27 +370,19 @@ struct TerminalView: View {
         processIndicatorOverlay
       }
       .onAppear {
-        // Restore scroll position when view appears
-        if let savedPosition = terminalManager.scrollPositions[session.id] {
-          DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            // Use a calculated anchor based on saved position
-            // Since we can't directly set scroll offset, we'll scroll to a calculated position
-            // For now, if position is near bottom (>= 0.9), scroll to bottom
-            // Otherwise, try to maintain relative position
-            if savedPosition >= 0.9 {
-              proxy.scrollTo("BOTTOM", anchor: .bottom)
-            } else {
-              // Try to scroll to a position that approximates the saved ratio
-              // This is a simplified approach - full implementation would require tracking line IDs
-              proxy.scrollTo("BOTTOM", anchor: UnitPoint(x: 0.5, y: savedPosition))
-            }
+        // Restore the offset of a tab the user had scrolled up in when they left it.
+        if let offset = terminalManager.savedScrollOffsets[session.id] {
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            scrollPosition.scrollTo(y: offset)
           }
         }
       }
       .onDisappear {
-        // Save current scroll position (simplified - would need actual scroll offset)
-        // For now, we'll save a flag that user was not at bottom
-        // Full implementation would require ScrollViewReader with offset tracking
+        if scrollDistanceFromBottom > 40 {
+          terminalManager.savedScrollOffsets[session.id] = scrollOffsetY
+        } else {
+          terminalManager.savedScrollOffsets.removeValue(forKey: session.id)
+        }
       }
     }
   }
@@ -438,6 +433,15 @@ struct TerminalView: View {
       }
     }
     .id("TERMINAL_SCROLL_VIEW")
+    .scrollPosition($scrollPosition)
+    .onScrollGeometryChange(for: CGPoint.self) { geometry in
+      CGPoint(
+        x: geometry.contentOffset.y,
+        y: max(0, geometry.contentSize.height - geometry.containerSize.height - geometry.contentOffset.y))
+    } action: { _, new in
+      scrollOffsetY = new.x
+      scrollDistanceFromBottom = new.y
+    }
     .scrollIndicators(.visible)
     .onChange(of: session.output) { _, _ in
       updateCachedAttributedOutput()

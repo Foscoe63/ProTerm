@@ -662,6 +662,21 @@ struct CommandPaletteView: View {
             }
         })
         
+        // Session templates
+        for template in productivityTools.sessionTemplates {
+            commands.append(CommandItem(
+                title: "New Session: \(template.name)",
+                subtitle: template.description ?? template.workingDirectory,
+                icon: "rectangle.stack.badge.plus",
+                category: "Templates"
+            ) {
+                terminalManager.addSession(from: template)
+                productivityTools.useSessionTemplate(template)
+                selectedTab = terminalManager.sessions.count - 1
+                ToastManager.shared.show("Started \(template.name)", type: .success)
+            })
+        }
+        
         // Quick commands
         for quickCommand in productivityTools.quickCommands {
             commands.append(CommandItem(

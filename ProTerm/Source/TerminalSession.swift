@@ -49,6 +49,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   private var commandStartTime: Date?
 
   var cwd: URL = FileManager.default.homeDirectoryForCurrentUser
+  /// Extra environment variables for the login shell (e.g. from a session template).
+  var extraEnvironment: [String: String] = [:]
   private let shellManager: ShellManager
 
   // Terminal width for COLUMNS environment variable
@@ -201,6 +203,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     if env["PATH"] == nil || env["PATH"]?.isEmpty == true {
       env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     }
+    env.merge(extraEnvironment) { _, new in new }
     return env
   }
 

@@ -1,11 +1,13 @@
 // SessionPersistence.swift
 import Foundation
 
-/// Handles saving and restoring terminal sessions (IDs, titles, maybe history).
+/// Handles saving and restoring terminal sessions (titles, colors, working directories).
 struct SessionSnapshot: Codable {
     var id: UUID
     var title: String
     var scrollPosition: Double = 0.0  // Scroll position as a ratio (0.0 = top, 1.0 = bottom)
+    var cwd: String?
+    var color: String?
 }
 
 final class SessionPersistence: @unchecked Sendable {
@@ -17,16 +19,15 @@ final class SessionPersistence: @unchecked Sendable {
         return folder.appendingPathComponent("sessions.json")
     }()
 
-    func save(sessions: [TerminalSession]) {
-        let snapshots = sessions.map { SessionSnapshot(id: $0.id, title: "Session \($0.id.uuidString.prefix(4))") }
+    func save(snapshots: [SessionSnapshot]) {
         if let data = try? JSONEncoder().encode(snapshots) {
-            try? data.write(to: fileURL)
+            try? data.write(to: fileURL, options: .atomic)
         }
     }
 
-    func load() -> [UUID] {
+    func load() -> [SessionSnapshot] {
         guard let data = try? Data(contentsOf: fileURL),
               let snapshots = try? JSONDecoder().decode([SessionSnapshot].self, from: data) else { return [] }
-        return snapshots.map { $0.id }
+        return snapshots
     }
 }

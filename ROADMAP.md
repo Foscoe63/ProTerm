@@ -25,8 +25,8 @@ Evidence comes from a source read on 2026-10-03; file names are under `ProTerm/S
 | Export | Share sheet | **Missing** | No `NSSharingService` or `ShareLink` anywhere | S |
 | Advanced | Recording and playback | **Missing** | The `isRecording` in `PreferencesView:553` is the shortcut-capture state, not a terminal recorder | L |
 | Advanced | Smarter completion | **Partial** | `getCompletions` is called from `TerminalView:2081`; it is a static list and alias expansion, with no filesystem, history or per-command completion | M |
-| Shortcuts | Customizer UI | **Partial** | `PreferencesView` ~L553-660 has a record/capture UI, but the manager gates the whole thing with a single `isEnabled`, so per-action binding needs checking | M |
-| Shortcuts | Action binding | **Partial** | See above; needs an action registry and conflict detection | M |
+| Shortcuts | Customizer UI | **Working** (corrected after M2 read) | Record/capture sheet, per-action overrides, reset, and conflict detection already exist | none |
+| Shortcuts | Action binding | **Working** | `KeyboardShortcutsManager.Action` enum with overrides; adding new actions is the only gap | S |
 | Palette | Movable window | **Partial** | `CommandPaletteView` is an in-window overlay at `ContentView:504`; `DraggablePanel.swift` already provides a drag modifier. A separate NSPanel would be the heavier option | S (drag) / M (window) |
 | AI | Real SDK | **Mock** | `ChatbotView.getSiriResponse` is a keyword if-chain. LM Studio makes a real HTTP call (OpenAI-compatible). `AIManager` holds only prefs | M |
 | Plugins | Protocol | **Missing** | `Plugin` and `PluginCommand` are data models, and install/enable just flip flags, so nothing is loaded or executed | L |
@@ -84,3 +84,7 @@ Ordered by value over cost. Each milestone should build cleanly and be committed
 
 ### Suggested order
 M0 → M1 → M2 → M3 → M4 (collapsible sections, then split panes, then recording) → M5.
+
+## Progress
+- M0, M1: done (commit 1f2dd92).
+- M2: scroll restore, session restore (title/color/cwd), templates (palette + Templates prefs tab) done. Shortcuts needed no work.

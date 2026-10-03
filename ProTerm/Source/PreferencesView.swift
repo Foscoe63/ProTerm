@@ -23,6 +23,7 @@ struct PreferencesView: View {
         case aliases       = "Aliases"
         case prompt        = "Prompt"
         case quickCommands = "Quick Commands"
+        case templates     = "Templates"
         case ssh           = "SSH"
         case ai            = "AI"
     }
@@ -113,6 +114,8 @@ struct PreferencesView: View {
                         PromptSettings()
                     case .quickCommands:
                         QuickCommandsSettings()
+                    case .templates:
+                        TemplateSettings()
                     case .ssh:
                         SSHConnectionSettings()
                     case .ai:
@@ -2241,5 +2244,129 @@ struct FlowLayout: Layout {
             
             self.size = CGSize(width: maxWidth, height: currentY + lineHeight)
         }
+    }
+}
+
+// MARK: - Session Templates Settings
+struct TemplateSettings: View {
+    @EnvironmentObject var productivityTools: ProductivityTools
+    @EnvironmentObject var terminalManager: TerminalManager
+    @State private var editingId: UUID?
+    @State private var name = ""
+    @State private var directory = ""
+    @State private var commands = ""
+    @State private var environment = ""
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Session Templates").font(.title2).fontWeight(.bold)
+                Text("A template opens a new tab in a folder, sets environment variables, and runs startup commands. Templates also appear in the Command Palette.")
+                    .font(.caption).foregroundColor(.secondary)
+
+                if productivityTools.sessionTemplates.isEmpty {
+                    Text("No templates yet.").foregroundColor(.secondary)
+                }
+                ForEach(productivityTools.sessionTemplates) { template in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(template.name).font(.headline)
+                            Text(summary(template)).font(.caption).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Open") {
+                            terminalManager.addSession(from: template)
+                            productivityTools.useSessionTemplate(template)
+                        }
+                        Button("Edit") { load(template) }
+                        Button("Delete", role: .destructive) {
+                            productivityTools.removeSessionTemplate(template)
+                            if editingId == template.id { reset() }
+                        }
+                    }
+                    .padding(8)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(6)
+                }
+
+                Divider()
+                Text(editingId == nil ? "New Template" : "Edit Template").font(.headline)
+                TextField("Name", text: $name).textFieldStyle(.roundedBorder)
+                HStack {
+                    TextField("Working directory (e.g. ~/Projects/app)", text: $directory)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true
+                        panel.canChooseFiles = false
+                        if panel.runModal() == .OK, let url = panel.url { directory = url.path }
+                    }
+                }
+                Text("Startup commands (one per line)").font(.caption)
+                TextEditor(text: $commands)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(height: 80)
+                    .border(Color.secondary.opacity(0.3))
+                Text("Environment variables (KEY=VALUE, one per line)").font(.caption)
+                TextEditor(text: $environment)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(height: 60)
+                    .border(Color.secondary.opacity(0.3))
+                HStack {
+                    Button(editingId == nil ? "Add Template" : "Save Changes", action: save)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    if editingId != nil { Button("Cancel", action: reset) }
+                }
+            }
+        }
+    }
+
+    private func summary(_ t: ProductivityTools.SessionTemplate) -> String {
+        var parts: [String] = []
+        if let dir = t.workingDirectory, !dir.isEmpty { parts.append(dir) }
+        if !t.initialCommands.isEmpty { parts.append("\(t.initialCommands.count) command(s)") }
+        if !t.environment.isEmpty { parts.append("\(t.environment.count) env var(s)") }
+        return parts.isEmpty ? "Plain session" : parts.joined(separator: " · ")
+    }
+
+    private func parsedEnvironment() -> [String: String] {
+        var result: [String: String] = [:]
+        for line in environment.split(separator: "\n") {
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces)
+            let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            if !key.isEmpty { result[key] = value }
+        }
+        return result
+    }
+
+    private func save() {
+        let cmds = commands.split(separator: "\n").map(String.init)
+        let dir = directory.trimmingCharacters(in: .whitespaces)
+        if let id = editingId, var existing = productivityTools.sessionTemplates.first(where: { $0.id == id }) {
+            existing.name = name
+            existing.workingDirectory = dir.isEmpty ? nil : dir
+            existing.initialCommands = cmds
+            existing.environment = parsedEnvironment()
+            productivityTools.updateSessionTemplate(existing)
+        } else {
+            productivityTools.addSessionTemplate(
+                name: name, initialCommands: cmds,
+                workingDirectory: dir.isEmpty ? nil : dir, environment: parsedEnvironment())
+        }
+        reset()
+    }
+
+    private func load(_ t: ProductivityTools.SessionTemplate) {
+        editingId = t.id
+        name = t.name
+        directory = t.workingDirectory ?? ""
+        commands = t.initialCommands.joined(separator: "\n")
+        environment = t.environment.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
+    }
+
+    private func reset() {
+        editingId = nil; name = ""; directory = ""; commands = ""; environment = ""
     }
 }

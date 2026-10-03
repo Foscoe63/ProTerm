@@ -10,7 +10,7 @@ final class TerminalManager: ObservableObject {
 
     /// The UI watches this array for changes (new/closed sessions).
     @Published var sessions: [TerminalSession] = [] {
-        didSet { SessionPersistence.shared.save(sessions: sessions) }
+        didSet { persistSnapshot() }
     }
     
     /// Tab metadata (names, colors) indexed by session ID
@@ -19,6 +19,9 @@ final class TerminalManager: ObservableObject {
     /// Scroll positions indexed by session ID (0.0 = top, 1.0 = bottom)
     @Published var scrollPositions: [UUID: Double] = [:]
     
+    /// Scroll offsets (points) of tabs the user had scrolled away from the bottom when leaving them.
+    var savedScrollOffsets: [UUID: CGFloat] = [:]
+    
     /// Version counter to force TabView updates when metadata changes
     @Published var tabMetadataVersion: Int = 0
     
@@ -26,6 +29,8 @@ final class TerminalManager: ObservableObject {
     private var shellManager: ShellManager?
     private var didBootstrapSessions = false
     private var titleObserver: NSObjectProtocol?
+    private var willTerminateObserver: NSObjectProtocol?
+    private var isRestoring = false
 
     /// Sessions are created once `setShellManager` runs (ContentView.onAppear / ProTermApp).
     init() {
@@ -63,32 +68,107 @@ final class TerminalManager: ObservableObject {
     private func bootstrapSessionsIfNeeded() {
         guard !didBootstrapSessions, shellManager != nil else { return }
         didBootstrapSessions = true
-        let savedIDs = SessionPersistence.shared.load()
-        if savedIDs.isEmpty {
+        isRestoring = true
+        let snapshots = SessionPersistence.shared.load()
+        if snapshots.isEmpty {
             addSession()
         } else {
-            for _ in savedIDs { addSession() }
+            for snapshot in snapshots {
+                var directory: URL?
+                if let path = snapshot.cwd {
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                        directory = URL(fileURLWithPath: path)
+                    }
+                }
+                addSession(
+                    initialCWD: directory,
+                    name: snapshot.title,
+                    color: snapshot.color.flatMap { TabColor(rawValue: $0) } ?? .default
+                )
+            }
+        }
+        isRestoring = false
+        persistSnapshot()
+        willTerminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.persistSnapshot() }
         }
     }
 
-    // MARK: – Session handling
-    func addSession() {
-        guard let shellManager = shellManager else {
-            // Fallback to bash if shell manager not set
-            let session = TerminalSession(shellManager: ShellManager())
-            sessions.append(session)
-            tabMetadata[session.id] = TabMetadata(name: "Session \(sessions.count)", color: .default)
-            return
+    /// Saves titles, colors and working directories so tabs can be restored on next launch.
+    func persistSnapshot() {
+        guard !isRestoring else { return }
+        let snapshots = sessions.map { session -> SessionSnapshot in
+            let meta = tabMetadata[session.id]
+            return SessionSnapshot(
+                id: session.id,
+                title: meta?.name ?? "Session",
+                cwd: session.isSSHSession ? nil : session.cwd.path,
+                color: meta?.color.rawValue
+            )
         }
-        let session = TerminalSession(shellManager: shellManager)
+        SessionPersistence.shared.save(snapshots: snapshots)
+    }
+
+    // MARK: – Session handling
+    @discardableResult
+    func addSession(
+        initialCWD: URL? = nil,
+        name: String? = nil,
+        color: TabColor = .default,
+        environment: [String: String] = [:]
+    ) -> TerminalSession {
+        let session = TerminalSession(
+            shellManager: shellManager ?? ShellManager(),
+            initialCWD: initialCWD ?? FileManager.default.homeDirectoryForCurrentUser
+        )
+        session.extraEnvironment = environment
+        // Metadata must exist before the append so the persisted snapshot includes the real title.
+        tabMetadata[session.id] = TabMetadata(name: name ?? "Session \(sessions.count + 1)", color: color)
         sessions.append(session)
-        tabMetadata[session.id] = TabMetadata(name: "Session \(sessions.count)", color: .default)
+        return session
+    }
+    
+    /// Opens a new tab from a template: working directory, environment, then the initial commands
+    /// once the shell is ready. The caller should select the new tab so its shell starts.
+    @discardableResult
+    func addSession(from template: ProductivityTools.SessionTemplate) -> TerminalSession {
+        var directory: URL?
+        if let path = template.workingDirectory?.trimmingCharacters(in: .whitespaces), !path.isEmpty {
+            let expanded = (path as NSString).expandingTildeInPath
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue {
+                directory = URL(fileURLWithPath: expanded)
+            }
+        }
+        let session = addSession(
+            initialCWD: directory, name: template.name, color: .default, environment: template.environment)
+        let commands = template.initialCommands
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !commands.isEmpty else { return session }
+        Task { @MainActor [weak session] in
+            // Wait up to ~8s for the login shell to come up.
+            for _ in 0..<80 {
+                if let session, session.hasActivePTY, session.canAcceptLoginShellInput { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard let session, session.hasActivePTY else { return }
+            for command in commands {
+                session.runCommand(command)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        return session
     }
     
     func updateTabName(for sessionId: UUID, name: String) {
         if var metadata = tabMetadata[sessionId] {
             metadata.name = name
             tabMetadata[sessionId] = metadata
+            persistSnapshot()
         } else {
             tabMetadata[sessionId] = TabMetadata(name: name, color: .default)
         }
@@ -110,6 +190,7 @@ final class TerminalManager: ObservableObject {
             newMetadata[sessionId] = TabMetadata(name: "Session", color: color)
         }
         tabMetadata = newMetadata
+        persistSnapshot()
         tabMetadataVersion += 1
         // Explicitly trigger objectWillChange
         objectWillChange.send()
