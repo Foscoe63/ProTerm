@@ -39,7 +39,7 @@ struct ButtonBarView: View {
                 QuickSearchSheet(searchQuery: $searchQuery)
             }
             .sheet(isPresented: $showingChatbot) {
-                ChatbotView()
+                ChatbotView(session: terminalManager.sessions.indices.contains(selectedTab) ? terminalManager.sessions[selectedTab] : nil)
             }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermShowPreferences"))) { _ in
                 showingPreferences = true

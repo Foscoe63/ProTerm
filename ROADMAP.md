@@ -88,3 +88,4 @@ M0 → M1 → M2 → M3 → M4 (collapsible sections, then split panes, then rec
 ## Progress
 - M0, M1: done (commit 1f2dd92).
 - M2: scroll restore, session restore (title/color/cwd), templates (palette + Templates prefs tab) done. Shortcuts needed no work.
+- M3: output filters (hide/extract/replace/highlight) + color coding (`OutputStyler`, Filters prefs tab), rewritten tab completion (`CompletionEngine`), AI provider layer (`AIProvider`: Claude, OpenAI-compatible, LM Studio, offline help; streaming; keys in Keychain). Unit tests: `xcodebuild ... test -only-testing:ProTermTests`.

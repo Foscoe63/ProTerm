@@ -1557,134 +1557,125 @@ struct QuickCommandsSettings: View {
 // MARK: – AI Settings
 struct AISettings: View {
     @EnvironmentObject var aiManager: AIManager
-    @State private var localSelectedAI: AIManager.AIType = .siri
-    @State private var editingURL: String = ""
-    @State private var editingModel: String = ""
-    @State private var modelDebounceWorkItem: DispatchWorkItem? = nil
+    @State private var provider: AIManager.AIType = .builtIn
+    @State private var lmURL = ""
+    @State private var lmModel = ""
+    @State private var anthropicModel = ""
+    @State private var openAIURL = ""
+    @State private var openAIModel = ""
+    @State private var includeContext = false
+    @State private var apiKeyInput = ""
+    @State private var keyStatus: String?
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("AI Assistant Configuration")
-                .font(.title2)
-                .fontWeight(.semibold)
-            
-            Text("Choose your AI assistant and configure connection settings.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            
-            Divider()
-            
-            // AI Type Selection
-            VStack(alignment: .leading, spacing: 12) {
-                Text("AI Provider")
-                    .font(.headline)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("AI Assistant Configuration").font(.title2).fontWeight(.semibold)
                 
-                Picker("AI Provider", selection: $localSelectedAI) {
-                    Text("Siri").tag(AIManager.AIType.siri)
-                    Text("LM Studio").tag(AIManager.AIType.lmStudio)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Provider").font(.headline)
+                    Picker("Provider", selection: $provider) {
+                        ForEach(AIManager.AIType.allCases) { Text($0.displayName).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: provider) { _, newValue in
+                        aiManager.setAI(newValue)
+                        apiKeyInput = ""
+                        keyStatus = nil
+                    }
+                    Text(provider.description).font(.caption).foregroundColor(.secondary)
                 }
-                .pickerStyle(.segmented)
-                .onChange(of: localSelectedAI) { oldValue, newValue in
-                    if oldValue != newValue {
-                        aiManager.selectedAI = newValue
-                        UserDefaults.standard.set(newValue.rawValue, forKey: "selectedAI")
+                .padding().background(Color(NSColor.controlBackgroundColor)).cornerRadius(8)
+                
+                if provider == .anthropic {
+                    card("Claude") {
+                        field("Model", "claude-sonnet-5-5", $anthropicModel)
+                        keyField()
+                    }
+                }
+                if provider == .openAICompatible {
+                    card("OpenAI-compatible server") {
+                        field("Base URL", "https://api.openai.com", $openAIURL)
+                        field("Model", "e.g. gpt-4o-mini", $openAIModel)
+                        keyField()
+                    }
+                }
+                if provider == .lmStudio {
+                    card("LM Studio") {
+                        field("Server URL", "http://localhost:1234", $lmURL)
+                        field("Model (optional)", "Model name", $lmModel)
                     }
                 }
                 
-                Text(localSelectedAI.description)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                if provider != .builtIn {
+                    Toggle("Include the last 60 lines of terminal output as context", isOn: $includeContext)
+                    Text(provider == .lmStudio
+                         ? "Stays on your machine."
+                         : "Off by default. When on, terminal output (which may contain secrets) is sent to the provider.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                
+                Button("Save") { save() }.buttonStyle(.borderedProminent)
             }
             .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(8)
-            
-            // LM Studio Configuration
-            if localSelectedAI == .lmStudio {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("LM Studio Configuration")
-                        .font(.headline)
-                    
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Server URL:")
-                        TextField("http://localhost:1234", text: $editingURL)
-                            .textFieldStyle(.roundedBorder)
-                        Text("The URL where LM Studio is running (default: http://localhost:1234)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Model Name (optional):")
-                        TextField("Model name", text: $editingModel)
-                            .textFieldStyle(.roundedBorder)
-                            // Debounce model name changes:
-                            .onChange(of: editingModel) {
-                                modelDebounceWorkItem?.cancel()
-                                let workItem = DispatchWorkItem {
-                                    if editingModel != aiManager.lmStudioModel {
-                                        aiManager.lmStudioModel = editingModel
-                                        UserDefaults.standard.set(editingModel, forKey: "lmStudioModel")
-                                    }
-                                }
-                                modelDebounceWorkItem = workItem
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
-                            }
-                        Text("Specify a model name if you want to use a specific model")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .padding()
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-            }
-            
-            // Siri Information
-            if localSelectedAI == .siri {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: "info.circle")
-                            .foregroundColor(.blue)
-                        Text("Siri Integration")
-                            .font(.headline)
-                    }
-                    
-                    Text("Siri uses Apple's built-in voice assistant. Make sure Siri is enabled in System Settings.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding()
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-            }
-            
-            Spacer()
         }
-        .padding()
         .onAppear {
-            localSelectedAI = aiManager.selectedAI
-            editingURL = aiManager.lmStudioURL
-            editingModel = aiManager.lmStudioModel
+            provider = aiManager.selectedAI
+            lmURL = aiManager.lmStudioURL
+            lmModel = aiManager.lmStudioModel
+            anthropicModel = aiManager.anthropicModel
+            openAIURL = aiManager.openAIBaseURL
+            openAIModel = aiManager.openAIModel
+            includeContext = aiManager.includeTerminalContext
         }
-        .onDisappear {
-            // Cancel pending debounce and immediately save model if changed
-            if let workItem = modelDebounceWorkItem {
-                workItem.cancel()
-                if editingModel != aiManager.lmStudioModel {
-                    aiManager.lmStudioModel = editingModel
-                    UserDefaults.standard.set(editingModel, forKey: "lmStudioModel")
-                }
-                modelDebounceWorkItem = nil
-            }
-            saveURL()
+        .onDisappear { save() }
+    }
+    
+    private func save() {
+        aiManager.setLMStudioURL(lmURL)
+        aiManager.setLMStudioModel(lmModel)
+        aiManager.saveProviderSettings(
+            anthropicModel: anthropicModel, openAIBaseURL: openAIURL,
+            openAIModel: openAIModel, includeContext: includeContext)
+    }
+    
+    private func card<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.headline)
+            content()
+        }
+        .padding().background(Color(NSColor.controlBackgroundColor)).cornerRadius(8)
+    }
+    
+    private func field(_ label: String, _ placeholder: String, _ text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+            TextField(placeholder, text: text).textFieldStyle(.roundedBorder)
         }
     }
     
-    private func saveURL() {
-        guard editingURL != aiManager.lmStudioURL else { return }
-        aiManager.lmStudioURL = editingURL
-        UserDefaults.standard.set(editingURL, forKey: "lmStudioURL")
+    private func keyField() -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("API key")
+            HStack {
+                SecureField(aiManager.hasAPIKey(for: provider) ? "Saved in Keychain (enter a new one to replace)" : "Paste API key",
+                            text: $apiKeyInput)
+                    .textFieldStyle(.roundedBorder)
+                Button("Save Key") {
+                    keyStatus = aiManager.setAPIKey(apiKeyInput, for: provider)
+                        ? (apiKeyInput.isEmpty ? "Key removed" : "Key saved to Keychain") : "Could not update Keychain"
+                    apiKeyInput = ""
+                }
+                .disabled(apiKeyInput.isEmpty)
+                if aiManager.hasAPIKey(for: provider) {
+                    Button("Remove") {
+                        aiManager.setAPIKey("", for: provider)
+                        keyStatus = "Key removed"
+                    }
+                }
+            }
+            if let keyStatus { Text(keyStatus).font(.caption).foregroundColor(.secondary) }
+        }
     }
 }
 
