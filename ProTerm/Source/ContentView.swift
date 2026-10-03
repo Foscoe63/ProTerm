@@ -291,6 +291,16 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ProTermShowCommandPalette"))) { _ in
             showCommandPalette = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: SessionExporter.exportNotification)) { note in
+            guard terminalManager.sessions.indices.contains(selectedTab),
+                  let raw = note.userInfo?["format"] as? String,
+                  let format = ProductivityTools.ExportFormat(rawValue: raw) else { return }
+            SessionExporter.export(terminalManager.sessions[selectedTab], format: format)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: SessionExporter.shareNotification)) { _ in
+            guard terminalManager.sessions.indices.contains(selectedTab) else { return }
+            SessionExporter.share(terminalManager.sessions[selectedTab])
+        }
         .keyboardShortcuts(keyboardShortcutsManager)
         // MARK: – Drag‑and‑drop support (read‑only tabs)
         .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
@@ -1025,15 +1035,6 @@ struct TabButton: View {
             return true
         } isTargeted: { targeted in
             dragOverIndex = targeted ? index : nil
-        }
-        .onDrag {
-            isDragging = true
-            return NSItemProvider(object: session.id.uuidString as NSString)
-        } preview: {
-            Text(meta.name.isEmpty ? "Session \(index + 1)" : meta.name)
-                .padding(8)
-                .background(Color(NSColor.windowBackgroundColor))
-                .cornerRadius(4)
         }
         .onChange(of: terminalManager.sessions) { _, _ in
             isDragging = false

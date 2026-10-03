@@ -79,6 +79,7 @@ struct MoveablePanel<Content: View>: View {
     let onClose: (() -> Void)?
     
     @State private var panelOffset: CGSize = .zero
+    @State private var dragStartOffset: CGSize = .zero
     
     init(title: String, onClose: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
@@ -107,12 +108,13 @@ struct MoveablePanel<Content: View>: View {
             .gesture(
                 DragGesture()
                     .onChanged { value in
-                        panelOffset = value.translation
+                        panelOffset = CGSize(
+                            width: dragStartOffset.width + value.translation.width,
+                            height: dragStartOffset.height + value.translation.height
+                        )
                     }
-                    .onEnded { value in
-                        // Update position permanently
-                        panelOffset.width += value.translation.width
-                        panelOffset.height += value.translation.height
+                    .onEnded { _ in
+                        dragStartOffset = panelOffset
                     }
             )
             

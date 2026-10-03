@@ -303,7 +303,7 @@ class IntegrationFeatures: NSObject, ObservableObject {
             name: name,
             path: path,
             type: type,
-            fingerprint: generateFingerprint(),
+            fingerprint: Self.fingerprint(ofKeyAt: path),
             isDefault: isDefault,
             created: Date(),
             lastUsed: nil
@@ -324,10 +324,58 @@ class IntegrationFeatures: NSObject, ObservableObject {
         saveSSHKeys()
     }
     
-    private func generateFingerprint() -> String {
-        // Generate a mock fingerprint
-        let chars = "0123456789abcdef"
-        return String((0..<16).map { _ in chars.randomElement()! })
+    /// Runs `ssh-keygen -lf` on the key (or its .pub) and returns the SHA256 fingerprint, or "unknown".
+    nonisolated static func fingerprint(ofKeyAt path: String) -> String {
+        let expanded = (path as NSString).expandingTildeInPath
+        let pub = expanded.hasSuffix(".pub") ? expanded : expanded + ".pub"
+        let target = FileManager.default.fileExists(atPath: pub) ? pub : expanded
+        guard let output = runSSHKeygen(["-lf", target]) else { return "unknown" }
+        // Format: "256 SHA256:abc... comment (ED25519)"
+        let parts = output.split(separator: " ")
+        return parts.count > 1 ? String(parts[1]) : "unknown"
+    }
+
+    /// Generates a new key pair with `ssh-keygen`. Returns an error message on failure, nil on success.
+    nonisolated static func generateKeyPair(at path: String, type: SSHKeyType, comment: String, passphrase: String) -> String? {
+        let expanded = (path as NSString).expandingTildeInPath
+        guard !FileManager.default.fileExists(atPath: expanded) else {
+            return "A file already exists at \(expanded). Choose a different path."
+        }
+        let dir = (expanded as NSString).deletingLastPathComponent
+        do {
+            try FileManager.default.createDirectory(
+                atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        } catch {
+            return error.localizedDescription
+        }
+        let algorithm: String
+        switch type {
+        case .rsa: algorithm = "rsa"
+        case .ed25519: algorithm = "ed25519"
+        case .ecdsa: algorithm = "ecdsa"
+        case .dsa: algorithm = "dsa"
+        }
+        var args = ["-q", "-t", algorithm, "-f", expanded, "-N", passphrase, "-C", comment]
+        if type == .rsa { args += ["-b", "4096"] }
+        return runSSHKeygen(args) == nil ? "ssh-keygen failed." : nil
+    }
+
+    private nonisolated static func runSSHKeygen(_ arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
     private func loadSSHKeys() {
@@ -449,6 +497,7 @@ class IntegrationFeatures: NSObject, ObservableObject {
     // MARK: - Cloud Sync Methods
     
     func enableCloudSync(provider: CloudProvider) {
+        guard FeatureFlags.iCloudSyncEnabled else { return }
         cloudSyncEnabled = true
         syncProvider = provider
         syncStatus = .syncing
@@ -466,7 +515,7 @@ class IntegrationFeatures: NSObject, ObservableObject {
     }
     
     func syncNow() {
-        guard cloudSyncEnabled else { return }
+        guard FeatureFlags.iCloudSyncEnabled, cloudSyncEnabled else { return }
         syncStatus = .syncing
         
         // Simulate sync process

@@ -70,6 +70,22 @@ struct ProTermApp: App {
                 }
                 .keyboardShortcut(",", modifiers: [.command])
             }
+            CommandGroup(after: .saveItem) {
+                Menu("Export Session") {
+                    ForEach(ProductivityTools.ExportFormat.allCases, id: \.self) { format in
+                        Button("As \(format.rawValue)…") {
+                            NotificationCenter.default.post(
+                                name: SessionExporter.exportNotification,
+                                object: nil,
+                                userInfo: ["format": format.rawValue]
+                            )
+                        }
+                    }
+                }
+                Button("Share Session…") {
+                    NotificationCenter.default.post(name: SessionExporter.shareNotification, object: nil)
+                }
+            }
         }
     }
 }

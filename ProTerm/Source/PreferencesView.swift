@@ -2084,6 +2084,9 @@ struct AddSSHKeySheet: View {
     @State private var keyPath: String = ""
     @State private var keyType: IntegrationFeatures.SSHKeyType = .ed25519
     @State private var isDefault: Bool = false
+    @State private var generateNew: Bool = false
+    @State private var passphrase: String = ""
+    @State private var errorMessage: String?
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -2130,7 +2133,19 @@ struct AddSSHKeySheet: View {
                 }
                 .pickerStyle(.menu)
                 
+                Toggle("Generate a new key pair at this path", isOn: $generateNew)
+                if generateNew {
+                    SecureField("Passphrase (optional)", text: $passphrase)
+                        .textFieldStyle(.roundedBorder)
+                }
+                
                 Toggle("Set as default key", isOn: $isDefault)
+                
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
             }
             
             Spacer()
@@ -2139,7 +2154,14 @@ struct AddSSHKeySheet: View {
                 Spacer()
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.escape)
-                Button("Save", action: {
+                Button(generateNew ? "Generate" : "Save", action: {
+                    if generateNew {
+                        if let error = IntegrationFeatures.generateKeyPair(
+                            at: keyPath, type: keyType, comment: name, passphrase: passphrase) {
+                            errorMessage = error
+                            return
+                        }
+                    }
                     integrationFeatures.addSSHKey(
                         name: name,
                         path: keyPath,
@@ -2154,7 +2176,7 @@ struct AddSSHKeySheet: View {
             }
         }
         .padding()
-        .frame(width: 500, height: 400)
+        .frame(width: 500, height: 460)
     }
 }
 
