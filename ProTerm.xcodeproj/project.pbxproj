@@ -49,6 +49,16 @@
 			path = ProTerm;
 			sourceTree = "<group>";
 		};
+		DE7A1C012EAA9520000C9E08 /* ProTermTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ProTermTests;
+			sourceTree = "<group>";
+		};
+		DE7A1C022EAA9520000C9E08 /* ProTermUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ProTermUITests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -81,6 +91,8 @@
 			children = (
 				DED6025D2EC4D3940009DBB6 /* ProTerm.xctestplan */,
 				DE684CF12EAA951F000C9E08 /* ProTerm */,
+				DE7A1C012EAA9520000C9E08 /* ProTermTests */,
+				DE7A1C022EAA9520000C9E08 /* ProTermUITests */,
 				DE684CF02EAA951F000C9E08 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -133,6 +145,9 @@
 			dependencies = (
 				DE684CFE2EAA9520000C9E08 /* PBXTargetDependency */,
 			);
+			fileSystemSynchronizedGroups = (
+				DE7A1C012EAA9520000C9E08 /* ProTermTests */,
+			);
 			name = ProTermTests;
 			packageProductDependencies = (
 			);
@@ -152,6 +167,9 @@
 			);
 			dependencies = (
 				DE684D082EAA9520000C9E08 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				DE7A1C022EAA9520000C9E08 /* ProTermUITests */,
 			);
 			name = ProTermUITests;
 			packageProductDependencies = (
@@ -395,7 +413,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -410,6 +428,7 @@
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
+					"@executable_path",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.5;
@@ -445,6 +464,7 @@
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
+					"@executable_path",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.5;
@@ -464,6 +484,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
@@ -486,6 +507,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
@@ -507,6 +529,7 @@
 		DE684D172EAA9520000C9E08 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
@@ -527,6 +550,7 @@
 		DE684D182EAA9520000C9E08 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;

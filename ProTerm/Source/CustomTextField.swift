@@ -321,6 +321,9 @@ struct CustomTextField: NSViewRepresentable {
         
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                ProTermPTYDebug.log(
+                    "[ProTermPTY] CustomTextField insertNewline session=\(parent.sessionID.uuidString) "
+                        + "text=\(ProTermPTYDebug.repr((control as? NSTextField)?.stringValue ?? ""))")
                 // Ensure binding is up to date before submitting
                 if let textField = control as? NSTextField {
                     let currentValue = textField.stringValue
@@ -329,13 +332,7 @@ struct CustomTextField: NSViewRepresentable {
                 }
                 // Call onSubmit - this is already on main thread from delegate
                 parent.onSubmit()
-                
-                // End editing first to ensure updateNSView doesn't think we're still editing
-                if let textField = control as? NSTextField, let window = textField.window {
-                    // End editing by making the window the first responder (temporarily)
-                    window.makeFirstResponder(nil)
-                }
-                
+
                 // Clear the text field immediately and forcefully
                 if let textField = control as? NSTextField {
                     // Clear the text field directly
@@ -351,6 +348,11 @@ struct CustomTextField: NSViewRepresentable {
                 }
                 // Update the parent binding to empty immediately
                 parent.text = ""
+
+                // End editing after submit so the field stays attached to the window
+                if let textField = control as? NSTextField, let window = textField.window {
+                    window.makeFirstResponder(textField)
+                }
                 
                 // Restore focus after a delay to ensure the command has been processed
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {

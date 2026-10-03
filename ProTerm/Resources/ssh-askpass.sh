@@ -1,11 +1,11 @@
-# Check if password is provided via environment variable
-if [ ! -z "$PROTERM_SSH_PASSWORD" ]; then
-    echo "$PROTERM_SSH_PASSWORD"
-    exit 0
+# Secure SSH password prompt using AppleScript
+PROMPT="$1"
+if [ -z "$PROMPT" ]; then
+    PROMPT="SSH Password:"
 fi
 
-# Fallback to osascript dialog if no environment variable is set
-PROMPT="$1"
-PASSWORD=$(/usr/bin/osascript -e 'Tell application "System Events" to display dialog "'"$PROMPT"'" default answer "" with hidden answer' -e 'text returned of result' 2>/dev/null)
+# Get password via secure AppleScript dialog (no process env exposure)
+PASSWORD=$(/usr/bin/osascript -e ' Tell application "System Events" to display dialog "'"$PROMPT"'" default answer "" with hidden answer' -e 'text returned of result' 2>/dev/null)
 
-echo "$PASSWORD"
+# Sanitize output (escape special characters)
+echo "$PASSWORD" | sed 's/[$`\\"]/\\/&/g'

@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import ProTerm
 
 final class AppearanceProfileTests: XCTestCase {

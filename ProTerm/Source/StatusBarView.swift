@@ -18,6 +18,15 @@ struct StatusBarView: View {
         return terminalManager.sessions[selectedTab]
     }
 
+    /// True when a foreground command is running (not the idle login-shell PTY).
+    private var showsBusyIndicator: Bool {
+        guard let session = currentSession else { return false }
+        if session.isLoginShellActive && session.hasActivePTY {
+            return false
+        }
+        return session.isProcessRunning
+    }
+
     var body: some View {
         HStack(spacing: 16) {
             // Shell type
@@ -61,8 +70,8 @@ struct StatusBarView: View {
                 }
             }
             
-            // Process indicator
-            if isProcessRunning {
+            // Process indicator (login shell stays "running" for the PTY child — show only for commands)
+            if showsBusyIndicator {
                 Divider()
                     .frame(height: 14)
                 
@@ -114,12 +123,14 @@ struct StatusBarView: View {
         .onChange(of: currentSession?.cwd) { _, _ in
             updateStatus()
         }
-        .onChange(of: currentSession?.isProcessRunning) { _, newValue in
-            isProcessRunning = newValue ?? false
-            if !(newValue ?? false) {
-                // Process finished, update execution time
+        .onChange(of: currentSession?.isProcessRunning) { _, _ in
+            isProcessRunning = showsBusyIndicator
+            if !showsBusyIndicator {
                 executionTime = currentSession?.lastCommandExecutionTime
             }
+        }
+        .onChange(of: currentSession?.isLoginShellActive) { _, _ in
+            isProcessRunning = showsBusyIndicator
         }
         .onChange(of: currentSession?.lastCommandExecutionTime) { _, newValue in
             executionTime = newValue
@@ -142,7 +153,7 @@ struct StatusBarView: View {
         if displayPath.isEmpty { displayPath = "~" }
         currentDirectory = displayPath
         
-        isProcessRunning = session.isProcessRunning
+        isProcessRunning = showsBusyIndicator
         updateGitBranch()
     }
     

@@ -165,10 +165,11 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
         let description: String
     }
     
+    // Terminal.app standard shortcuts: Cmd+T=newTab, Cmd+W=closeTab, Cmd+K=clear, Cmd+N=new window
     static let shortcuts: [Shortcut] = [
         Shortcut(key: KeyEquivalent("a"), modifiers: .command, action: .selectAll, description: "Select All"),
         Shortcut(key: KeyEquivalent("f"), modifiers: .command, action: .quickSearch, description: "Quick Search"),
-        Shortcut(key: KeyEquivalent("l"), modifiers: .command, action: .clearScreen, description: "Clear Screen"),
+        Shortcut(key: KeyEquivalent("k"), modifiers: .command, action: .clearScreen, description: "Clear Screen (Terminal.app style)"),
         Shortcut(key: KeyEquivalent("t"), modifiers: .command, action: .newTab, description: "New Tab"),
         Shortcut(key: KeyEquivalent("w"), modifiers: .command, action: .closeTab, description: "Close Tab"),
         Shortcut(key: KeyEquivalent("c"), modifiers: .command, action: .copy, description: "Copy"),
@@ -179,7 +180,7 @@ class KeyboardShortcutsManager: NSObject, ObservableObject {
         Shortcut(key: KeyEquivalent("p"), modifiers: [.command, .shift], action: .commandPalette, description: "Command Palette"),
         Shortcut(key: KeyEquivalent("p"), modifiers: .command, action: .commandPalette, description: "Command Palette (Cmd+P)"),
         
-        // Number keys for tab switching
+        // Number keys for tab switching (Terminal.app style: Cmd+1 through Cmd+9)
         Shortcut(key: KeyEquivalent("1"), modifiers: .command, action: .switchTab(0), description: "Switch to Tab 1"),
         Shortcut(key: KeyEquivalent("2"), modifiers: .command, action: .switchTab(1), description: "Switch to Tab 2"),
         Shortcut(key: KeyEquivalent("3"), modifiers: .command, action: .switchTab(2), description: "Switch to Tab 3"),

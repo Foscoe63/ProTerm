@@ -194,129 +194,21 @@ struct TerminalView: View {
         updateCachedAttributedOutput: updateCachedAttributedOutput,
         handleSSHOutputChange: handleSSHOutputChange
       ))
-      // Listen for search notifications from the button bar
-      .onReceive(NotificationCenter.default.publisher(for: .searchInTerminal)) { notification in
-        if let query = notification.object as? String {
-          searchQuery = query
-          updateCachedAttributedOutput()
-        }
-      }
-      // Listen for regex mode toggle
-      .onReceive(NotificationCenter.default.publisher(for: .setSearchRegexMode)) { notification in
-        if let useRegexValue = notification.object as? Bool {
-          useRegex = useRegexValue
-          updateCachedAttributedOutput()
-        }
-      }
-      // Listen for find notifications (same as search - just highlights)
-      .onReceive(NotificationCenter.default.publisher(for: .findInTerminal)) { notification in
-        if let query = notification.object as? String {
-          searchQuery = query
-          updateCachedAttributedOutput()
-        }
-      }
-      // Listen for replace notifications
-      .onReceive(NotificationCenter.default.publisher(for: .replaceInTerminal)) { notification in
-        if let dict = notification.object as? [String: String],
-          let findText = dict["find"],
-          let replaceText = dict["replace"]
-        {
-          performReplace(find: findText, replace: replaceText)
-        }
-      }
-      // Listen for copy selected text notification from button bar
-      .onReceive(NotificationCenter.default.publisher(for: .copySelectedText)) { _ in
-        // Send copy action to first responder (works with SwiftUI Text view selection)
-        NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
-      }
-      // Listen for paste to input notification from button bar
-      .onReceive(NotificationCenter.default.publisher(for: .pasteToInput)) { notification in
-        // Ensure UI updates occur on the main thread
-        DispatchQueue.main.async {
-          if let dict = notification.object as? [String: Any] {
-            if let target = dict["session"] as? TerminalSession, target === session,
-              let text = dict["text"] as? String
-            {
-              applyPaste(text)
-              return
-            } else {
-              return
-            }
-          }
-          if let textToPaste = notification.object as? String {
-            applyPaste(textToPaste)
-          }
-        }
-      }
-      // Listen for redo last command
-      .onReceive(NotificationCenter.default.publisher(for: .copyLastCommand)) { note in
-        // Check if this notification is for this session (by ID to be safe)
-        if let target = note.object as? TerminalSession, target.id == session.id {
-          applyRedo()
-        }
-      }
-      .onReceive(NotificationCenter.default.publisher(for: .focusCommandInput)) { note in
-        let targetId = note.object as? UUID
-        if (targetId == session.id) || (targetId == nil) {
-            if !self.showPasswordInput {
-                self.forceFocus(reason: .notification)
-            }
-        }
-      }
-      // Listen for command history sheet
-      .onReceive(NotificationCenter.default.publisher(for: .showHistory)) { note in
-        // Check if this notification is for this session (by ID to be safe)
-        if let target = note.object as? TerminalSession, target.id == session.id {
-          presentHistoryIfNeeded()
-        }
-      }
-      // Listen for system info notification
-      .onReceive(NotificationCenter.default.publisher(for: .showSystemInfo)) { note in
-        // Check if this notification is for this session (by ID to be safe)
-        if let target = note.object as? TerminalSession, target.id == session.id {
-          showSystemInfo()
-        }
-      }
-      .sheet(isPresented: $showingHistorySheet) {
-        EnhancedHistorySheetView(
-          session: session,
-          onPick: { cmd in
-            showingHistorySheet = false
-            // End editing first to ensure updateNSView can update the text field
-            if let window = NSApplication.shared.keyWindow {
-              window.makeFirstResponder(nil)
-            }
-            // Wait a moment for editing to end and sheet to dismiss, then set the command
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-              // Set the command input
-              self.commandInput = cmd
-              // Restore focus after a brief delay to ensure the update has completed
-              DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                // Ensure window is key
-                if let window = NSApplication.shared.mainWindow {
-                  NSApp.activate(ignoringOtherApps: true)
-                  window.makeKeyAndOrderFront(nil)
-                }
-                // Set focus binding
-                self.commandFieldIsFocused = true
-                // Also try to directly focus the text field
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                  self.commandFieldIsFocused = true
-                }
-              }
-            }
-          }
-        )
-        .frame(width: 600, height: 400)
-      }
-      // Listen for terminal bell
-      .onReceive(
-        NotificationCenter.default.publisher(for: .terminalBell)
-      ) { notification in
-        if let sessionId = notification.object as? UUID, sessionId == session.id {
-          handleTerminalBell()
-        }
-      }
+      .modifier(TerminalNotificationModifier(
+        session: session,
+        searchQuery: $searchQuery,
+        useRegex: $useRegex,
+        showPasswordInput: $showPasswordInput,
+        showingHistorySheet: $showingHistorySheet,
+        updateCachedAttributedOutput: updateCachedAttributedOutput,
+        applyPaste: applyPaste,
+        applyRedo: applyRedo,
+        forceFocus: { reason in forceFocus(reason: reason) },
+        showSystemInfo: showSystemInfo,
+        presentHistoryIfNeeded: presentHistoryIfNeeded,
+        handleHistorySelection: handleHistorySelection,
+        handleTerminalBell: handleTerminalBell
+      ))
   }
 
   // MARK: - Terminal Output Area
@@ -615,9 +507,9 @@ struct TerminalView: View {
       }
       
       // Listen for pagination key sends to update cooldown
-      NotificationCenter.default.addObserver(forName: Notification.Name("ProTermPaginationKeySent"), object: nil, queue: .main) { [weak session] _ in
+      NotificationCenter.default.addObserver(forName: Notification.Name("ProTermPaginationKeySent"), object: nil, queue: .main) { _ in
+        // Update the state on the main actor
         MainActor.assumeIsolated {
-          guard session != nil else { return }
           self.lastPaginationKeySentTime = Date()
         }
       }
@@ -2097,6 +1989,35 @@ struct TerminalView: View {
     showingHistorySheet = true
   }
 
+  /// Handles a command picked from the history sheet: dismiss it, put the command
+  /// into the input field, and hand focus back to it.
+  @MainActor
+  private func handleHistorySelection(_ command: String) {
+    showingHistorySheet = false
+    // End editing first to ensure updateNSView can update the text field
+    if let window = NSApplication.shared.keyWindow {
+      window.makeFirstResponder(nil)
+    }
+    // Wait a moment for editing to end and sheet to dismiss, then set the command
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+      self.commandInput = command
+      // Restore focus after a brief delay to ensure the update has completed
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        // Ensure window is key
+        if let window = NSApplication.shared.mainWindow {
+          NSApp.activate(ignoringOtherApps: true)
+          window.makeKeyAndOrderFront(nil)
+        }
+        // Set focus binding
+        self.commandFieldIsFocused = true
+        // Also try to directly focus the text field
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+          self.commandFieldIsFocused = true
+        }
+      }
+    }
+  }
+
   private func showSystemInfo() {
     let info = session.getSystemInfo()
     // Append system info to output with proper formatting
@@ -2217,121 +2138,6 @@ private struct HistorySheetView: View {
       }
     }
     .padding(.bottom, 8)
-  }
-}
-
-// MARK: - Enhanced History Sheet with Search and Statistics
-private struct EnhancedHistorySheetView: View {
-  @ObservedObject var session: TerminalSession
-  let onPick: (String) -> Void
-  @Environment(\.dismiss) private var dismiss
-
-  @State private var searchText: String = ""
-  @State private var showStatistics: Bool = false
-
-  var filteredCommands: [String] {
-    let reversed = session.commandHistory.reversed()
-    if searchText.isEmpty {
-      return Array(reversed)
-    }
-    return reversed.filter { $0.localizedCaseInsensitiveContains(searchText) }
-  }
-
-  var commandStats: [String: Int] {
-    var stats: [String: Int] = [:]
-    for cmd in session.commandHistory {
-      let baseCmd = cmd.components(separatedBy: " ").first ?? cmd
-      stats[baseCmd, default: 0] += 1
-    }
-    return stats
-  }
-
-  var body: some View {
-    NavigationStack {
-      VStack(spacing: 0) {
-        // Search bar
-        HStack {
-          Image(systemName: "magnifyingglass")
-            .foregroundColor(.secondary)
-          TextField("Search history...", text: $searchText)
-          if !searchText.isEmpty {
-            Button(action: { searchText = "" }) {
-              Image(systemName: "xmark.circle.fill")
-                .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-          }
-        }
-        .padding()
-
-        Divider()
-
-        if showStatistics {
-          // Statistics view
-          ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-              Text("Command Statistics")
-                .font(.headline)
-                .padding()
-
-              ForEach(Array(commandStats.sorted(by: { $0.value > $1.value }).prefix(10)), id: \.key)
-              { cmd, count in
-                HStack {
-                  Text(cmd)
-                    .font(.system(.body, design: .monospaced))
-                  Spacer()
-                  Text("\(count)")
-                    .foregroundColor(.secondary)
-                }
-                .padding(.horizontal)
-              }
-            }
-          }
-        } else {
-          // Command list
-          if filteredCommands.isEmpty {
-            VStack {
-              Spacer()
-              Text("No commands found")
-                .foregroundColor(.secondary)
-              Spacer()
-            }
-          } else {
-            List(filteredCommands, id: \.self) { cmd in
-              HStack {
-                Text(cmd)
-                  .font(.system(.body, design: .monospaced))
-                  .lineLimit(1)
-                Spacer()
-                Button("Use") {
-                  onPick(cmd)
-                  dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-              }
-              .contentShape(Rectangle())
-              .onTapGesture {
-                onPick(cmd)
-                dismiss()
-              }
-            }
-            .listStyle(.plain)
-          }
-        }
-      }
-      .navigationTitle("Command History")
-      .toolbar {
-        ToolbarItem(placement: .cancellationAction) {
-          Button("Close") { dismiss() }
-        }
-        ToolbarItem(placement: .primaryAction) {
-          Button(action: { showStatistics.toggle() }) {
-            Image(systemName: showStatistics ? "chart.bar.fill" : "chart.bar")
-          }
-        }
-      }
-    }
-    .frame(width: 600, height: 400)
   }
 }
 

@@ -16,6 +16,9 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   @Published var output: String = ""
   @Published var isProcessRunning: Bool = false
+  @Published var isLoginShellActive: Bool = false
+  /// Latest PS1 from the login-shell PTY (not stored in scrollback).
+  @Published var shellPromptLine: String = ""
   @Published var lastCommandExecutionTime: TimeInterval? = nil
 
   // Limit output size to prevent performance issues
@@ -37,6 +40,11 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         return limit
     }
     return 100000 // Fallback if disabled (should be enough for a few pages)
+  }
+  
+  // Terminal.app style: if true, show raw PTY output without prompt filtering
+  private var useTerminalAppPromptStyle: Bool {
+    return UserDefaults.standard.object(forKey: "ProTermTerminalAppStyle") as? Bool ?? false
   }
   private var commandStartTime: Date?
 
@@ -132,6 +140,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   private var pendingCR = false // Track for cross-chunk Carriage Return handling
   private var didPostAttachWinch = false // One-shot guard for post-attach TTY size push
   private var isInAltScreen = false // Track alternate screen buffer state for TUIs
+  private var loginShellIOFeaturesScheduled = false
 
   private enum IOSettingKey {
     static let bracketed = "ProTermBracketedPaste"
@@ -173,6 +182,26 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     }
     // Otherwise, append exactly one newline
     self.output = self.limitOutputSize(out + "\n")
+  }
+
+  /// Environment for forked login shells. Finder-launched apps often have a minimal PATH unlike Xcode runs.
+  private func loginShellEnvironment() -> [String: String] {
+    var env = ProcessInfo.processInfo.environment
+    let shellPath = currentShellPath()
+    env["TERM"] = env["TERM"] ?? "xterm-256color"
+    env["COLUMNS"] = "\(columns)"
+    env["LINES"] = "\(rows)"
+    env["SHELL"] = shellPath
+    env["PWD"] = cwd.path
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    if env["HOME"] == nil || env["HOME"]?.isEmpty == true { env["HOME"] = home }
+    let username = NSUserName()
+    if env["USER"] == nil || env["USER"]?.isEmpty == true { env["USER"] = username }
+    if env["LOGNAME"] == nil || env["LOGNAME"]?.isEmpty == true { env["LOGNAME"] = username }
+    if env["PATH"] == nil || env["PATH"]?.isEmpty == true {
+      env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    }
+    return env
   }
 
   // Access the selected shell path safely with respect to MainActor isolation
@@ -280,7 +309,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   private func configureIOFeaturesForActivePTY() {
     // Never configure IO features for SSH sessions
     guard hasActivePTY, !ioFeaturesApplied, !isSSHSession else { return }
-    if bracketedPasteEnabled {
+    // Bracketed-paste toggles make zsh echo `?2004h` into scrollback; skip on local login shell.
+    if bracketedPasteEnabled, !isLoginShellActive {
       sendInput("\u{001B}[?2004h")
     }
     if mouseReportingEnabled {
@@ -288,6 +318,23 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       sendInput("\u{001B}[?1006h")
     }
     ioFeaturesApplied = true
+  }
+
+  /// Enable bracketed-paste/mouse after zsh has drawn PS1 (avoids `?2004h` corrupting the prompt).
+  @MainActor
+  private func scheduleLoginShellIOFeaturesIfNeeded() {
+    guard isLoginShellActive, !isSSHSession, hasActivePTY, !ioFeaturesApplied else { return }
+    guard !loginShellIOFeaturesScheduled else { return }
+    loginShellIOFeaturesScheduled = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+      Task { @MainActor [weak self] in
+        guard let self, self.isLoginShellActive, self.hasActivePTY else {
+          self?.loginShellIOFeaturesScheduled = false
+          return
+        }
+        self.configureIOFeaturesForActivePTY()
+      }
+    }
   }
 
   private func tearDownIOFeatures() {
@@ -372,13 +419,17 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
           if !toAppend.isEmpty {
             let normalized = toAppend.precomposedStringWithCanonicalMapping
+            ProTermPTYDebug.log(
+              "[ProTermPTY] PTY read \(normalized.count) bytes preview=\(ProTermPTYDebug.repr(normalized, maxLength: 80))")
             appendOnMain(normalized)
           }
         } else if n == 0 {
+          ProTermPTYDebug.log("[ProTermPTY] PTY read EOF (n=0) — child may have exited")
           source.cancel()
           break
         } else {
           if errno == EAGAIN || errno == EWOULDBLOCK { break }
+          ProTermPTYDebug.log("[ProTermPTY] PTY read error errno=\(errno)")
           source.cancel()
           break
         }
@@ -400,6 +451,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
           }
         }
         strongSelf.isProcessRunning = false
+        strongSelf.isLoginShellActive = false
         // Reset SSH session flag if this was an SSH session
         if strongSelf.isSSHSession {
           strongSelf.isSSHSession = false
@@ -438,6 +490,41 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // Push to both ends if available
     if masterFD >= 0 { setWindowSize(fd: masterFD, cols: UInt16(columns), rows: UInt16(rows)) }
     if slaveFD >= 0 { setWindowSize(fd: slaveFD, cols: UInt16(columns), rows: UInt16(rows)) }
+  }
+
+  /// Scrollback text for the UI — never includes the live inline PS1.
+  var loginShellDisplayScrollback: String {
+    guard isLoginShellActive, !isSSHSession else { return output }
+    var text = PromptBuilder.stripTrailingPromptOnlyLines(
+      output,
+      matchingPrompt: shellPromptLine
+    )
+    text = PromptBuilder.scrollbackRemovingPromptOnlyLines(text)
+    return text.trimmingCharacters(in: .newlines)
+  }
+
+  /// Cache key for login-shell attributed output (scrollback + inline PS1).
+  var loginShellDisplayCacheKey: String {
+    loginShellDisplayScrollback + "\u{1E}" + shellPromptLine
+  }
+
+  /// Store PS1 for the inline field and purge it from scrollback storage.
+  @MainActor
+  private func applyLoginShellPromptLine(_ prompt: String) {
+    guard isLoginShellActive, !isSSHSession else { return }
+    let normalized = PromptBuilder.normalizedPromptLine(prompt)
+    guard !normalized.isEmpty else { return }
+    let purged = limitOutputSize(
+      PromptBuilder.stripTrailingPromptOnlyLines(
+        PromptBuilder.scrollbackRemovingPromptOnlyLines(output),
+        matchingPrompt: normalized
+      )
+    )
+    // Set PS1 before purging scrollback so display filters never flash the prompt in history.
+    shellPromptLine = normalized
+    if output != purged {
+      output = purged
+    }
   }
 
   var prompt: String {
@@ -494,8 +581,13 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       .replacingOccurrences(of: "%b", with: gitBranch.isEmpty ? "" : "[\(gitBranch)]")
   }
 
-  init(shellManager: ShellManager) {
+  init(
+    shellManager: ShellManager,
+    startLoginShell: Bool = true,
+    initialCWD: URL = FileManager.default.homeDirectoryForCurrentUser
+  ) {
     self.shellManager = shellManager
+    self.cwd = initialCWD
     let defaults = UserDefaults.standard
     self.bracketedPasteEnabled = defaults.object(forKey: IOSettingKey.bracketed) as? Bool ?? true
     self.mouseReportingEnabled = defaults.object(forKey: IOSettingKey.mouse) as? Bool ?? false
@@ -581,6 +673,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
           strongSelf.ptyHandler = nil
         }
         strongSelf.isProcessRunning = false
+        strongSelf.isLoginShellActive = false
 
         // If this is an SSH session, reset the flag and notify IntegrationFeatures to disconnect
         if strongSelf.isSSHSession {
@@ -609,6 +702,12 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
           name: .focusCommandInput, object: strongSelf.id)
       }
     }
+
+    if startLoginShell {
+      Task { @MainActor [weak self] in
+        self?.startLoginShellIfNeeded()
+      }
+    }
   }
 
   deinit {
@@ -623,6 +722,222 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     }
   }
 
+  /// Clear stale `isProcessRunning` / FD state so commands are not silently dropped.
+  @MainActor
+  func reconcileStalePTYState() {
+    guard isProcessRunning else { return }
+
+    if hasActivePTY { return }
+
+    var processStillRunning = false
+    if let proc = process {
+      processStillRunning = proc.isRunning
+    } else if let handler = ptyHandler {
+      processStillRunning = handler.isRunning
+    } else if childPID > 0 {
+      processStillRunning = isPIDAlive(childPID)
+    }
+
+    let masterUsable = masterFD >= 0 && isFDValid(masterFD)
+    let handlerMaster = ptyHandler?.masterFD ?? -1
+    let handlerMasterUsable = handlerMaster >= 0 && isFDValid(handlerMaster)
+
+    if processStillRunning && (masterUsable || handlerMasterUsable) {
+      if !isProcessRunning {
+        isProcessRunning = true
+      }
+      if !isSSHSession, masterUsable || handlerMasterUsable {
+        isLoginShellActive = true
+      }
+      ProTermPTYDebug.log(
+        "[ProTermPTY] reconcileStalePTYState: process alive but PTY inactive — resetting read source")
+      ptyReadSource?.cancel()
+      ptyReadSource = nil
+      if masterUsable {
+        startPTYReadSource(masterFD: masterFD)
+      }
+      return
+    }
+
+    ProTermPTYDebug.log(
+      "[ProTermPTY] reconcileStalePTYState: clearing stale flags \(ptyDebugFlags())")
+    tearDownStalePTYAfterChildExit()
+  }
+
+  /// Call before handling Enter so we never leave `isProcessRunning` without a usable PTY.
+  @MainActor
+  func prepareForCommandSubmission() {
+    reconcileStalePTYState()
+    if !isSSHSession, !hasActivePTY, isLoginShellActive || childPID > 0 || masterFD >= 0 {
+      if !isLoginShellActive {
+        isLoginShellActive = true
+      }
+      startLoginShellIfNeeded()
+    }
+  }
+
+  @MainActor
+  private func tearDownStalePTYAfterChildExit() {
+    isShuttingDown = true
+    shutdownFlag.set(true)
+    tearDownIOFeatures()
+    ptyReadSource?.cancel()
+    ptyReadSource = nil
+    ptyReadHandle?.readabilityHandler = nil
+    if let handler = ptyHandler {
+      handler.stop()
+      ptyHandler = nil
+    }
+    let closeMaster = masterFD
+    masterFD = -1
+    if closeMaster >= 0 {
+      DispatchQueue.global(qos: .userInitiated).async {
+        close(closeMaster)
+      }
+    }
+    if slaveFD >= 0 {
+      let fd = slaveFD
+      slaveFD = -1
+      DispatchQueue.global(qos: .userInitiated).async {
+        close(fd)
+      }
+    }
+    childExitSource?.cancel()
+    childExitSource = nil
+    childPID = 0
+    process = nil
+    isProcessRunning = false
+    isLoginShellActive = false
+    isShuttingDown = false
+    shutdownFlag.set(false)
+    pendingCR = false
+    didPostAttachWinch = false
+    loginShellIOFeaturesScheduled = false
+  }
+
+  @MainActor
+  func startLoginShellIfNeeded() {
+    if hasActivePTY {
+      ProTermPTYDebug.log(
+        "[ProTermPTY] startLoginShellIfNeeded skipped — PTY already active \(ptyDebugFlags())")
+      return
+    }
+
+    if childPID > 0, isPIDAlive(childPID), masterFD >= 0, isFDValid(masterFD) {
+      ProTermPTYDebug.log(
+        "[ProTermPTY] startLoginShellIfNeeded reattaching read source to existing shell")
+      isProcessRunning = true
+      isLoginShellActive = true
+      isSSHSession = false
+      startPTYReadSource(masterFD: masterFD)
+      return
+    }
+
+    if childPID > 0 || masterFD >= 0 {
+      ProTermPTYDebug.log(
+        "[ProTermPTY] startLoginShellIfNeeded clearing stale PTY handles before relaunch")
+      tearDownStalePTYAfterChildExit()
+    }
+
+    ProTermPTYDebug.log("[ProTermPTY] startLoginShellIfNeeded launching shell")
+
+    let shellPath = currentShellPath()
+    let args = [shellPath, "-l"]
+    let cArgs = args.map { strdup($0) }
+    let argvPointers: [UnsafeMutablePointer<CChar>?] = cArgs.map { $0 } + [nil]
+
+    let env = loginShellEnvironment()
+    let cEnvStrings = env.map { strdup("\($0.key)=\($0.value)") }
+    let envPointers: [UnsafeMutablePointer<CChar>?] = cEnvStrings.map { $0 } + [nil]
+
+    var master: Int32 = -1
+    let pid = argvPointers.withUnsafeBufferPointer { argvBuf in
+      envPointers.withUnsafeBufferPointer { envvBuf in
+        proterm_forkpty_exec_in_dir(
+          shellPath,
+          UnsafeMutablePointer(mutating: argvBuf.baseAddress),
+          UnsafeMutablePointer(mutating: envvBuf.baseAddress),
+          cwd.path,
+          &master,
+          UInt16(rows),
+          UInt16(columns)
+        )
+      }
+    }
+
+    for ptr in cArgs { free(ptr) }
+    for ptr in cEnvStrings { free(ptr) }
+
+    guard pid > 0, master >= 0 else {
+      ProTermPTYDebug.log("[ProTermPTY] startLoginShellIfNeeded FAILED pid=\(pid) master=\(master)")
+      appendOutputChunk("Error: Failed to start login shell\n")
+      return
+    }
+
+    ProTermPTYDebug.log("[ProTermPTY] startLoginShellIfNeeded OK pid=\(pid) masterFD=\(master)")
+    self.masterFD = master
+    self.childPID = pid
+    self.isProcessRunning = true
+    self.isLoginShellActive = true
+    self.isSSHSession = false
+    if !output.isEmpty {
+      let peeled = PromptBuilder.splitTrailingPromptFromChunk(output)
+      if !peeled.prompt.isEmpty {
+        applyLoginShellPromptLine(peeled.prompt)
+      }
+    }
+    self.process = nil
+    setNonBlocking(master)
+    setWindowSize(fd: master, cols: UInt16(columns), rows: UInt16(rows))
+    monitorChildProcess(pid: pid)
+    startPTYReadSource(masterFD: master)
+    loginShellIOFeaturesScheduled = false
+
+    didPostAttachWinch = false
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+      Task { @MainActor [weak self] in
+        self?.postAttachWinchIfNeeded()
+      }
+    }
+  }
+
+  @MainActor
+  func submitToActivePTY(_ command: String, payload: String? = nil) {
+    let sanitized = command.sanitizedTerminalCommand()
+    let trimmed = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      ProTermPTYDebug.log("[ProTermPTY] submitToActivePTY ignored empty command")
+      return
+    }
+    commandHistory.append(trimmed)
+    recordPTYSubmission(command: sanitized, payload: payload)
+    let wire = (payload ?? sanitized) + "\n"
+    ProTermPTYDebug.log(
+      "[ProTermPTY] submitToActivePTY wire=\(ProTermPTYDebug.repr(wire)) \(ptyDebugFlags())")
+    sendInput(wire)
+  }
+
+  /// Record an empty Return in the local login-shell UI (prompt-only line in scrollback).
+  @MainActor
+  func recordPTYSubmissionNewline() {
+    recordPTYSubmission(command: "", payload: nil)
+  }
+
+  /// Empty Return: advance scrollback with a newline only (PS1 stays inline).
+  @MainActor
+  private func recordPTYSubmission(command: String, payload: String?) {
+    guard isLoginShellActive && !isSSHSession else { return }
+    let typed = (payload ?? command).sanitizedTerminalCommand()
+    guard typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    var combined = output
+    if !combined.isEmpty, !combined.hasSuffix("\n") {
+      combined += "\n"
+    }
+    output = limitOutputSize(
+      PromptBuilder.stripTrailingPromptOnlyLines(combined, matchingPrompt: shellPromptLine))
+    ProTermPTYDebug.log("[ProTermPTY] recordPTYSubmission appended blank line outputLen=\(output.count)")
+  }
+
   @MainActor
   func runCommand(_ command: String) {
     let sanitized = command.sanitizedTerminalCommand()
@@ -631,59 +946,22 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     // Record history of commands submitted
     commandHistory.append(trimmed)
 
-    // Prevent re-execution, but also check if process is actually still running
-    if isProcessRunning {
-      // Safety check: verify the process or PTY handler is still active
-      var processStillRunning = false
-      if let proc = process {
-        processStillRunning = proc.isRunning
-      } else if let handler = ptyHandler {
-        processStillRunning = handler.isRunning
-      } else if childPID > 0 {
-        processStillRunning = isPIDAlive(childPID)
-      }
+    prepareForCommandSubmission()
 
-      // We only need a valid masterFD; slaveFD is typically closed in the parent process
-      let hasValidFD = masterFD >= 0 || (ptyHandler?.masterFD ?? -1) >= 0
+    if hasActivePTY || (isLoginShellActive && !isSSHSession && canAcceptLoginShellInput) {
+      sendInput(sanitized + "\n")
+      return
+    }
 
-      if !processStillRunning || !hasValidFD {
-        // Process has terminated or FDs are invalid - clean up immediately
-        isProcessRunning = false
-        ptyReadHandle?.readabilityHandler = nil
-        shutdownFlag.set(true)
-        isShuttingDown = true
-
-        // Close file descriptors
-        if slaveFD >= 0 {
-          let fd = slaveFD
-          DispatchQueue.global(qos: .userInitiated).async {
-            close(fd)
-          }
-          slaveFD = -1
-        }
-        if masterFD >= 0 {
-          let fd = masterFD
-          DispatchQueue.global(qos: .userInitiated).async {
-            close(fd)
-          }
-          masterFD = -1
-        }
-
-        ptyReadHandle = nil
-        process = nil
-        isShuttingDown = false
-        shutdownFlag.set(false)
-
-        // Ensure a single trailing newline (no prompt appended)
-        ensureSingleTrailingNewline()
-
-        // Continue with the command
-      } else if hasActivePTY {
-        // Process is running and has active PTY - allow input to be sent to it
-        // This is handled in TerminalView
+    if isProcessRunning && !hasActivePTY {
+      reconcileStalePTYState()
+      if hasActivePTY {
+        sendInput(sanitized + "\n")
         return
-      } else {
-        // Process is running but no active PTY - don't allow new commands
+      }
+      if isProcessRunning {
+        ProTermPTYDebug.log("[ProTermPTY] runCommand blocked — shell still busy after reconcile")
+        appendOutputChunk("\nError: Shell is not ready. Wait a moment or open a new tab.\n")
         return
       }
     }
@@ -708,123 +986,14 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       return
     }
 
-    // Handle interactive commands with PTY (python, python3, node, ssh, etc.)
-    // Also include commands that need full environment PATH (npm, yarn, brew, etc.)
-    // Note: Some editor CLI tools (code, cursor) are NOT in this list because
-    // they just launch external apps and don't need PTY. We include "opencode" so it inherits the login-shell PATH.
-    let interactiveCommands = [
-      "python", "python3", "node", "irb", "ruby", "ghci", "ipython", "ssh",
-      "npm", "npx", "yarn", "pnpm", "bun",  // Node.js package managers
-      "pip", "pip3", "poetry", "pipenv",     // Python package managers  
-      "vim", "nvim", "nano", "emacs",        // Editors
-      "less", "more", "man",                  // Pagers
-      "htop", "top",                          // System monitors
-      "mysql", "psql", "mongo", "redis-cli", // Database CLIs
-      "docker", "kubectl",                    // Container tools
-      "git", "tig",                           // Git tools
-      "brew",                                 // Homebrew
-      "opencode",
-    ]
-    let commandName = trimmed.components(separatedBy: .whitespaces).first?.lowercased() ?? ""
-    if interactiveCommands.contains(commandName) {
-      // Add newline after command so output appears on next line
-      if !output.hasSuffix("\n") {
-        output.append("\n")
-      }
-      runInteractiveCommand(sanitized)
-      return
+    // Terminal.app runs commands attached to a pseudo-terminal. Use the PTY path
+    // for all remaining commands so tools that inspect isatty(), use pagers,
+    // emit ANSI color, or need interactive stdin behave like they do there.
+    if !output.hasSuffix("\n") {
+      output.append("\n")
     }
-
-    // Handle ls command - force column output since we're not a real TTY
-    var commandToRun = sanitized
-    if trimmed == "ls" || trimmed.hasPrefix("ls ") {
-      // Check if column formatting flags are already specified
-      let hasColumnFlag =
-        trimmed.contains(" -C") || trimmed.contains(" -x") || trimmed.contains(" -1")
-        || trimmed.contains(" -l") || trimmed.contains(" -la") || trimmed.contains(" -lh")
-        || trimmed.contains(" -lt") || trimmed.contains(" -ltr")
-
-      if !hasColumnFlag {
-        // Add -C flag to force column output (horizontal and vertical)
-        if trimmed == "ls" {
-          commandToRun = "ls -C"
-        } else {
-          // Insert -C after "ls" but before any other arguments
-          let parts = command.components(separatedBy: .whitespaces)
-          if parts.first?.lowercased() == "ls" {
-            var newParts = [parts[0], "-C"]
-            newParts.append(contentsOf: parts.dropFirst())
-            commandToRun = newParts.joined(separator: " ")
-          }
-        }
-      }
-    }
-
-    // Run other commands via ProcessRunner (asynchronously; do NOT block the main actor)
-    let shellPath = currentShellPath()
-    let effectiveColumns = max(80, columns)
-
-    // Mark running and command start time
-    self.isProcessRunning = true
     self.commandStartTime = Date()
-
-    let runner = ProcessRunner()
-    _ = runner.run(
-      shellPath: shellPath,
-      command: commandToRun,
-      cwd: cwd,
-      columns: effectiveColumns,
-      rows: self.rows,
-      onOutput: { [weak self] chunk in
-        Task { @MainActor [weak self] in
-          guard let self = self else { return }
-          var outputToAdd = chunk
-          if !self.output.hasSuffix("\n") && !self.output.isEmpty {
-            outputToAdd = "\n" + chunk
-          }
-          self.appendOutputChunk(outputToAdd)
-        }
-      },
-      onBell: { [weak self] in
-        guard let self = self else { return }
-        NotificationCenter.default.post(
-          name: Notification.Name("ProTermTerminalBell"), object: self.id)
-      },
-      onComplete: { [weak self] in
-        Task { @MainActor [weak self] in
-          guard let self = self else { return }
-          self.isProcessRunning = false
-          if let startTime = self.commandStartTime {
-            self.lastCommandExecutionTime = Date().timeIntervalSince(startTime)
-            self.commandStartTime = nil
-          }
-          self.ensureSingleTrailingNewline()
-        }
-      },
-      onError: { [weak self] error in
-        Task { @MainActor [weak self] in
-          guard let self = self else { return }
-          ErrorHandler.shared.logError(
-            message: "Failed to execute command: \(sanitized)",
-            type: .commandExecution,
-            command: sanitized,
-            sessionId: self.id
-          )
-          // Ensure current output line ends, then append the error
-          var current = self.output
-          while current.hasSuffix("\n") || current.hasSuffix("\r\n") || current.hasSuffix("\r") {
-            if current.hasSuffix("\r\n") {
-              current = String(current.dropLast(2))
-            } else {
-              current = String(current.dropLast(1))
-            }
-          }
-          self.output = current
-          self.appendOutputChunk("\nError: \(error.localizedDescription)\n")
-          self.isProcessRunning = false
-        }
-      }
-    )
+    runInteractiveCommand(sanitized)
   }
 
   @MainActor
@@ -930,6 +1099,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       self.masterFD = master
       self.childPID = pid
       self.isProcessRunning = true
+      self.isLoginShellActive = false
       self.isSSHSession = true
       
       // Set PTY to non-blocking mode
@@ -989,10 +1159,11 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     
     let pid = argvPointers.withUnsafeBufferPointer { argvBuf in
       envPointers.withUnsafeBufferPointer { envvBuf in
-        proterm_forkpty_exec(
+        proterm_forkpty_exec_in_dir(
           shellPath,
           UnsafeMutablePointer(mutating: argvBuf.baseAddress),
           UnsafeMutablePointer(mutating: envvBuf.baseAddress),
+          cwd.path,
           &master,
           UInt16(rows),
           UInt16(columns)
@@ -1012,6 +1183,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     self.masterFD = master
     self.childPID = pid
     self.isProcessRunning = true
+    self.isLoginShellActive = false
     self.process = nil
     
     // Set non-blocking
@@ -1050,6 +1222,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
       self.childPID = handler.childPID
       self.isProcessRunning = true
+      self.isLoginShellActive = false
       self.process = nil  // Not using Foundation.Process in forkpty path
 
       // Monitor the child process to detect when it exits
@@ -1115,6 +1288,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
       self.childPID = handler.childPID
       self.isProcessRunning = true
+      self.isLoginShellActive = false
       self.process = nil
       
       // Monitor the child process to detect when it exits
@@ -1178,10 +1352,11 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
     let pid = argvPointers.withUnsafeBufferPointer { argvBuf in
       envPointers.withUnsafeBufferPointer { envvBuf in
-        proterm_forkpty_exec(
+        proterm_forkpty_exec_in_dir(
           shellPath,
           UnsafeMutablePointer(mutating: argvBuf.baseAddress),
           UnsafeMutablePointer(mutating: envvBuf.baseAddress),
+          cwd.path,
           &master,
           UInt16(rows),
           UInt16(columns)
@@ -1201,6 +1376,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     self.masterFD = master
     self.childPID = pid
     self.isProcessRunning = true
+    self.isLoginShellActive = false
     self.process = nil
 
     // Non-blocking master FD
@@ -1222,13 +1398,6 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       }
     }
 
-    // Belt-and-suspenders: immediately force kernel TTY size via stty inside the PTY
-    // Some shells/programs read rows/cols only after startup; this ensures they see correct values.
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-      guard let self = self else { return }
-      let cmd = "stty rows \(self.rows) cols \(self.columns)\r"
-      self.sendInput(cmd)
-    }
   }
 
   private func monitorChildProcess(pid: pid_t) {
@@ -1260,6 +1429,11 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
         }
         // Defensive cleanup (idempotent with cancel handler):
         self.isProcessRunning = false
+        self.isLoginShellActive = false
+        if let startTime = self.commandStartTime {
+          self.lastCommandExecutionTime = Date().timeIntervalSince(startTime)
+          self.commandStartTime = nil
+        }
         self.pendingCR = false
         self.didPostAttachWinch = false
         self.utf8Remainder.removeAll(keepingCapacity: false)
@@ -1301,25 +1475,49 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
   // Required compatibility methods
   public func sendInput(_ input: String) {
     if let handler = ptyHandler {
+      ProTermPTYDebug.log(
+        "[ProTermPTY] sendInput via ptyHandler len=\(input.count) \(ProTermPTYDebug.repr(input))")
       handler.write(input)
       return
     }
     guard masterFD >= 0, let data = input.data(using: .utf8) else {
+      ProTermPTYDebug.log(
+        "[ProTermPTY] sendInput DROPPED masterFD=\(masterFD) childPID=\(childPID) "
+          + "running=\(isProcessRunning) loginShell=\(isLoginShellActive) wire=\(ProTermPTYDebug.repr(input))")
+      Task { @MainActor [weak self] in
+        self?.reconcileStalePTYState()
+        if let self, self.isLoginShellActive, !self.isSSHSession, !self.hasActivePTY {
+          self.startLoginShellIfNeeded()
+        }
+      }
       return
     }
     data.withUnsafeBytes { buffer in
       guard let base = buffer.baseAddress else { return }
+      errno = 0
       let written = Darwin.write(masterFD, base, data.count)
       if written < 0 {
-        // Write failed
+        let err = errno
+        ProTermPTYDebug.log(
+          "[ProTermPTY] sendInput WRITE FAILED fd=\(masterFD) errno=\(err) "
+            + "\(String(cString: strerror(err))) wire=\(ProTermPTYDebug.repr(input))")
+      } else if written != data.count {
+        ProTermPTYDebug.log(
+          "[ProTermPTY] sendInput partial write \(written)/\(data.count) fd=\(masterFD)")
       } else {
-        // Ensure the write is complete - for PTYs, the write should be immediate
-        // but we verify it completed successfully
-        if written != data.count {
-          // Partial write
-        }
+        ProTermPTYDebug.log(
+          "[ProTermPTY] sendInput OK fd=\(masterFD) bytes=\(written) \(ProTermPTYDebug.repr(input))")
       }
     }
+  }
+
+  /// True when the local login-shell PTY accepts keyboard input (including before read source attaches).
+  var canAcceptLoginShellInput: Bool {
+    guard isLoginShellActive, !isSSHSession else { return false }
+    if hasActivePTY { return true }
+    let fdOk = masterFD >= 0 && isFDValid(masterFD)
+    let pidOk = childPID > 0 && isPIDAlive(childPID)
+    return fdOk && pidOk
   }
 
   // Check if we have an active PTY (for interactive processes)
@@ -1396,6 +1594,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       } else {
         // Process stopped, clean up state
         self.isProcessRunning = false
+        self.isLoginShellActive = false
       }
     }
   }
@@ -1438,6 +1637,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     self.slaveFD = -1
     self.childPID = 0
     self.isProcessRunning = false
+    self.isLoginShellActive = false
     self.process = nil
     
     self.ensureSingleTrailingNewline()
@@ -1461,6 +1661,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     self.childPID = handler.childPID
     // The session is now running; we are not using a Foundation.Process.
     self.isProcessRunning = true
+    self.isLoginShellActive = false
     self.process = nil
     self.isSSHSession = isSSH
 
@@ -1522,10 +1723,15 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   func clearOutput() {
     output = ""
+    shellPromptLine = ""
     // Don't add prompt to output - it's shown inline in the input area
   }
 
   /// Append text to output with automatic size limiting
+  // Output throttling - debounce rapid output chunks
+  private var lastOutputTime: Date = .init()
+  private let outputThrottleInterval: TimeInterval = 0.1
+
   @MainActor
   func appendOutput(_ text: String) {
     appendOutputChunk(text)
@@ -1533,14 +1739,67 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
   @MainActor
   private func handleOutputChunkOnMain(_ chunk: String) {
-    guard !isShuttingDown && masterFD >= 0 else { return }
+    guard !isShuttingDown && masterFD >= 0 else {
+      ProTermPTYDebug.log(
+        "[ProTermPTY] handleOutputChunkOnMain DROPPED shuttingDown=\(isShuttingDown) masterFD=\(masterFD) "
+          + "chunkLen=\(chunk.count)")
+      return
+    }
     // Pre-handle minimal TUI control sequences (clear screen, alt-screen toggle)
-    let processed = processTUIControlSequences(chunk)
+    var processed = processTUIControlSequences(chunk)
+    if isLoginShellActive && !isSSHSession {
+      processed = PromptBuilder.stripBracketedPasteModeSequences(processed)
+      if PromptBuilder.isBracketedPasteModeOnlyChunk(processed) {
+        pendingCR = false
+        ProTermPTYDebug.log(
+          "[ProTermPTY] handleOutputChunkOnMain skipped bracketed-paste mode echo len=\(processed.count)")
+        return
+      }
+      if PromptBuilder.isPromptPaddingOnlyChunk(processed) {
+        pendingCR = false
+        ProTermPTYDebug.log(
+          "[ProTermPTY] handleOutputChunkOnMain skipped zsh padding before normalize len=\(processed.count)")
+        return
+      }
+    }
 
-    // Pass the stateful pendingCR flag to the normalization
-    let (normalized, nextPendingCR) = ANSIParser.normalizeControlCharacters(processed, pendingCR: self.pendingCR)
+    // zsh redraws prompts with bare `\r`; we must always overwrite the current line (not append).
+    let (normalized, nextPendingCR) = ANSIParser.normalizeControlCharacters(
+      processed,
+      pendingCR: self.pendingCR,
+      onlyClearPromptLikeLines: false
+    )
     self.pendingCR = nextPendingCR
-    
+
+    if isLoginShellActive && !isSSHSession {
+      let cleaned = PromptBuilder.stripIncompleteCSITail(
+        PromptBuilder.stripBracketedPasteModeSequences(normalized)
+      )
+      if PromptBuilder.isBracketedPasteModeOnlyChunk(cleaned) {
+        ProTermPTYDebug.log(
+          "[ProTermPTY] handleOutputChunkOnMain skipped bracketed-paste after normalize")
+        return
+      }
+      if PromptBuilder.isShellPromptLine(cleaned)
+        || cleaned.contains("@") && cleaned.contains("%")
+      {
+        scheduleLoginShellIOFeaturesIfNeeded()
+      }
+      if cleaned != normalized {
+        ProTermPTYDebug.log(
+          "[ProTermPTY] handleOutputChunkOnMain bracketed-paste cleanup "
+            + "\(ProTermPTYDebug.repr(normalized)) → \(ProTermPTYDebug.repr(cleaned))")
+      }
+      ProTermPTYDebug.log(
+        "[ProTermPTY] handleOutputChunkOnMain in=\(chunk.count) norm=\(cleaned.count) "
+          + "pendingCR=\(nextPendingCR) preview=\(ProTermPTYDebug.repr(cleaned))")
+      self.appendOutputChunk(cleaned)
+      return
+    }
+
+    ProTermPTYDebug.log(
+      "[ProTermPTY] handleOutputChunkOnMain in=\(chunk.count) norm=\(normalized.count) "
+        + "pendingCR=\(nextPendingCR) preview=\(ProTermPTYDebug.repr(normalized))")
     self.appendOutputChunk(normalized)
   }
 
@@ -1561,8 +1820,14 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       }
     }
     if didClear {
-      // Wipe the visible buffer so the next content renders cleanly
-      self.output = ""
+      // zsh redraws the prompt with ESC[J after every command; never wipe login-shell scrollback.
+      let preserveScrollback = isLoginShellActive && !isSSHSession
+      if preserveScrollback {
+        ProTermPTYDebug.log(
+          "[ProTermPTY] clear-screen sequence stripped (scrollback preserved) chunkLen=\(chunk.count)")
+      } else {
+        self.output = ""
+      }
       self.pendingCR = false
     }
 
@@ -1572,9 +1837,10 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       if s.contains(seq) {
         isInAltScreen = true
         s = s.replacingOccurrences(of: seq, with: "")
-        // Clear when entering alt-screen to simulate a fresh canvas
-        self.output = ""
-        self.pendingCR = false
+        if !(isLoginShellActive && !isSSHSession) {
+          self.output = ""
+          self.pendingCR = false
+        }
       }
     }
 
@@ -1584,19 +1850,133 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       if s.contains(seq) {
         isInAltScreen = false
         s = s.replacingOccurrences(of: seq, with: "")
-        // Ensure we end on a newline so subsequent prompt/commands look clean
-        if !self.output.hasSuffix("\n") { self.output += "\n" }
+        // Login shell keeps PS1 inline only — avoid a blank scrollback row above the input.
+        if !(isLoginShellActive && !isSSHSession), !self.output.hasSuffix("\n") {
+          self.output += "\n"
+        }
       }
     }
 
     return s
   }
 
+  /// Append login-shell PTY text incrementally. Never re-run full-buffer compaction (that erased `ls` output).
+  @MainActor
+  private func appendLoginShellOutputChunk(_ chunk: String, beforeLen: Int) {
+    var chunk = PromptBuilder.stripBracketedPasteModeSequences(chunk)
+    chunk = PromptBuilder.stripIncompleteCSITail(chunk)
+
+    if PromptBuilder.isBracketedPasteModeOnlyChunk(chunk) {
+      ProTermPTYDebug.log("[ProTermPTY] appendOutputChunk skipped bracketed-paste-only chunk")
+      return
+    }
+
+    if PromptBuilder.isNewlineOnlyChunk(chunk), output.hasSuffix("\n") {
+      ProTermPTYDebug.log("[ProTermPTY] appendOutputChunk skipped duplicate newline echo")
+      return
+    }
+
+    if PromptBuilder.isPromptPaddingOnlyChunk(chunk) {
+      ProTermPTYDebug.log(
+        "[ProTermPTY] appendOutputChunk skipped zsh padding chunk len=\(chunk.count)")
+      return
+    }
+
+    if PromptBuilder.isLoginShellPromptNoiseChunk(chunk) {
+      let livePrompt = PromptBuilder.lastShellPrompt(in: chunk)
+      if !livePrompt.isEmpty {
+        applyLoginShellPromptLine(livePrompt)
+      }
+      ProTermPTYDebug.log(
+        "[ProTermPTY] appendOutputChunk prompt-noise chunk "
+          + "prompt=\(ProTermPTYDebug.repr(shellPromptLine)) output \(beforeLen)→\(output.count)")
+      return
+    }
+
+    let peeled = PromptBuilder.splitTrailingPromptFromChunk(chunk)
+    if !peeled.prompt.isEmpty {
+      applyLoginShellPromptLine(peeled.prompt)
+    } else {
+      let livePrompt = PromptBuilder.lastShellPrompt(in: chunk)
+      if !livePrompt.isEmpty {
+        applyLoginShellPromptLine(livePrompt)
+      }
+    }
+
+    if PromptBuilder.isShellPromptOnlyChunk(chunk) {
+      ProTermPTYDebug.log(
+        "[ProTermPTY] appendOutputChunk prompt-only chunk "
+          + "peeledPrompt=\(ProTermPTYDebug.repr(peeled.prompt)) "
+          + "output \(beforeLen)→\(output.count)")
+      return
+    }
+
+    let toAppend = PromptBuilder.loginShellScrollbackToAppend(from: peeled.scrollback)
+    guard !toAppend.isEmpty else {
+      ProTermPTYDebug.log(
+        "[ProTermPTY] appendOutputChunk no scrollback lines "
+          + "peeledPrompt=\(ProTermPTYDebug.repr(peeled.prompt)) "
+          + "chunk=\(ProTermPTYDebug.repr(chunk, maxLength: 80))")
+      return
+    }
+
+    ProTermPTYDebug.log(
+      "[ProTermPTY] appendOutputChunk append=\(toAppend.count) "
+        + "peeledPrompt=\(ProTermPTYDebug.repr(peeled.prompt)) "
+        + "chunk=\(ProTermPTYDebug.repr(chunk, maxLength: 80))")
+
+    var combined = output
+    if !combined.isEmpty, !combined.hasSuffix("\n"), !toAppend.hasPrefix("\n") {
+      let lastChar = combined.last
+      let firstChar = toAppend.first
+      if lastChar != "\n", firstChar != "\n", peeled.prompt.isEmpty {
+        combined += "\n"
+      }
+    }
+    combined += toAppend
+    combined = PromptBuilder.capTrailingNewlines(combined, maxTrailing: 2)
+    combined = PromptBuilder.stripTrailingPromptOnlyLines(
+      combined, matchingPrompt: shellPromptLine)
+    output = limitOutputSize(combined)
+    ProTermPTYDebug.log(
+      "[ProTermPTY] appendOutputChunk output \(beforeLen)→\(output.count) loginShell=true "
+        + "shellPrompt=\(ProTermPTYDebug.repr(shellPromptLine))")
+  }
+
   @MainActor
   private func appendOutputChunk(_ chunk: String) {
     guard !chunk.isEmpty else { return }
-    
-    output = limitOutputSize(output + chunk)
+
+    let beforeLen = output.count
+    if isLoginShellActive && !isSSHSession {
+      appendLoginShellOutputChunk(chunk, beforeLen: beforeLen)
+      return
+    }
+
+    var combined = output + chunk
+    if hasActivePTY || isLoginShellActive {
+      combined = PromptBuilder.collapseRepeatedPrompts(in: combined)
+    }
+    output = limitOutputSize(combined)
+    ProTermPTYDebug.log(
+      "[ProTermPTY] appendOutputChunk output \(beforeLen)→\(output.count) loginShell=\(isLoginShellActive)")
+  }
+
+  @MainActor
+  func ptyDebugFlags() -> ProTermPTYDebug.PTYFlags {
+    ProTermPTYDebug.PTYFlags(
+      isProcessRunning: isProcessRunning,
+      isLoginShellActive: isLoginShellActive,
+      isSSHSession: isSSHSession,
+      isShuttingDown: isShuttingDown,
+      masterFD: masterFD,
+      childPID: childPID,
+      pidAlive: childPID > 0 ? isPIDAlive(childPID) : false,
+      fdValid: masterFD >= 0 ? isFDValid(masterFD) : false,
+      hasPTYHandler: ptyHandler != nil,
+      outputLength: output.count,
+      shellPromptLine: shellPromptLine
+    )
   }
 
   private func limitOutputSize(_ text: String) -> String {
@@ -1679,4 +2059,3 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     }
   }
 }
-

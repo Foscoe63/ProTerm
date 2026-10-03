@@ -8,6 +8,7 @@ struct SSHArgsBuilder {
         var identityFile: String?
         var password: String?
         var strictHostKeyChecking: Bool = false
+        var agentForwarding: Bool = true
         var serverAliveInterval: Int = 60
         var serverAliveCountMax: Int = 3
         var connectTimeout: Int = 30
@@ -25,6 +26,11 @@ struct SSHArgsBuilder {
 
         // Force PTY allocation and interactive mode
         args.append("-tt")
+        
+        // Agent forwarding (enabled by default)
+        if opts.agentForwarding {
+            args.append("-A")
+        }
         args += ["-o", "ServerAliveInterval=\(opts.serverAliveInterval)"]
         args += ["-o", "ServerAliveCountMax=\(opts.serverAliveCountMax)"]
         args += ["-o", "BatchMode=no"]

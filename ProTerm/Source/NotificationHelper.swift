@@ -143,6 +143,11 @@ extension Notification.Name {
     static let paginationKeySent = Notification.Name("ProTermPaginationKeySent")
     static let sshSessionClosed = Notification.Name("ProTermSSHSessionClosed")
     
+    // Session close confirmation (Terminal.app style warnings)
+    static let proTermCloseSessionWithWarning = Notification.Name("ProTermCloseSessionWithWarning")
+    static let proTermCloseMultipleSessionsWithWarning = Notification.Name("ProTermCloseMultipleSessionsWithWarning")
+    static let proTermConfirmForceClose = Notification.Name("ProTermConfirmForceClose")
+    
     // Preferences & UI
     static let proTermIOSettingsDidChange = Notification.Name("ProTermIOSettingsDidChange")
     static let closePreferences = Notification.Name("ProTermClosePreferences")

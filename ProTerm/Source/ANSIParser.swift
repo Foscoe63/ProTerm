@@ -6,8 +6,12 @@ import Combine
 struct ANSIParser {
     
     /// Parse ANSI escape codes and return attributed text
-    static func parse(_ text: String, baseFont: Font = .custom("Menlo", size: 12)) -> AttributedString {
-        let (normalized, _) = normalizeControlCharacters(text)
+    static func parse(
+        _ text: String,
+        baseFont: Font = .custom("Menlo", size: 12),
+        alreadyNormalized: Bool = false
+    ) -> AttributedString {
+        let normalized = alreadyNormalized ? text : normalizeControlCharacters(text).0
         var attributedString = AttributedString()
         var currentAttributes = AttributeContainer()
         currentAttributes.font = baseFont
@@ -115,32 +119,30 @@ struct ANSIParser {
         }
     }
     
-    static func normalizeControlCharacters(_ text: String, pendingCR: Bool = false) -> (String, Bool) {
+    static func normalizeControlCharacters(
+        _ text: String,
+        pendingCR: Bool = false,
+        onlyClearPromptLikeLines: Bool = false
+    ) -> (String, Bool) {
         var buffer = String()
         buffer.reserveCapacity(text.count)
         var i = text.startIndex
         var isCRPending = pendingCR
+        // True once ESC ] has been buffered, so its BEL terminator is preserved.
+        var isOSCOpen = false
         
         while i < text.endIndex {
             let ch = text[i]
             
             if ch == "\r" {
-                let nextIndex = text.index(after: i)
-                if nextIndex < text.endIndex, text[nextIndex] == "\n" {
-                    // Standard CRLF -> LF
-                    buffer.append("\n")
-                    isCRPending = false
-                    i = text.index(after: nextIndex)
-                    continue
-                }
-                // Standalone CR: clear the current line so subsequent text overwrites it
-                clearCurrentLine(&buffer)
-                isCRPending = false
-                i = text.index(after: i)
+                i = handleCarriageReturn(in: text, at: i, buffer: &buffer,
+                                         isCRPending: &isCRPending,
+                                         onlyPromptLike: onlyClearPromptLikeLines)
                 continue
             } else if ch == "\n" {
                 buffer.append("\n")
                 isCRPending = false
+                isOSCOpen = false
                 i = text.index(after: i)
             } else if ch == "\u{0008}" { // backspace
                 // In log-mode, we try to support simple backspaces but don't delete newlines
@@ -152,13 +154,18 @@ struct ANSIParser {
                 buffer.append("\n\n-- Page Break --\n\n")
                 isCRPending = false
                 i = text.index(after: i)
+            } else if ch == "\u{0011}" || ch == "\u{0013}" {
+                // XON/XOFF flow control characters: ignore them
+                i = text.index(after: i)
             } else if ch == "\u{0007}" { // bell
+                handleBell(buffer: &buffer, isOSCOpen: &isOSCOpen)
                 i = text.index(after: i)
             } else {
                 if isCRPending {
-                    buffer.append("\n")
+                    clearCurrentLine(&buffer, onlyPromptLike: onlyClearPromptLikeLines)
                     isCRPending = false
                 }
+                isOSCOpen = trackOSCState(ch, in: text, at: i, isOSCOpen: isOSCOpen)
                 buffer.append(ch)
                 i = text.index(after: i)
             }
@@ -166,12 +173,30 @@ struct ANSIParser {
         return (buffer, isCRPending)
     }
     
-    private static func clearCurrentLine(_ buffer: inout String) {
+    /// Truncates the buffer back to the start of its last line.
+    private static func clearCurrentLine(_ buffer: inout String, onlyPromptLike: Bool = false) {
+        if onlyPromptLike, !lastLineIsPromptLikeOrEmpty(buffer) {
+            return
+        }
         if let lastNewline = buffer.lastIndex(of: "\n") {
             buffer.removeSubrange(buffer.index(after: lastNewline)..<buffer.endIndex)
         } else {
             buffer.removeAll()
         }
+    }
+
+    private static func lastLineIsPromptLikeOrEmpty(_ buffer: String) -> Bool {
+        let line: String
+        if let lastNewline = buffer.lastIndex(of: "\n") {
+            line = String(buffer[buffer.index(after: lastNewline)...])
+        } else {
+            line = buffer
+        }
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        if PromptBuilder.isShellPromptLine(trimmed) { return true }
+        let collapsed = PromptBuilder.collapseRepeatedPrompts(onLine: trimmed)
+        return PromptBuilder.isShellPromptLine(collapsed)
     }
     
     /// Parse a single ANSI escape code
@@ -344,5 +369,53 @@ struct ANSIParser {
             Color(red: 1.0, green: 1.0, blue: 1.0)
         ]
         return palette[max(0, min(palette.count - 1, index))]
+    }
+}
+
+/// Normalization helpers live in a file-scope extension to keep `ANSIParser`'s own
+/// body inside the project's type-length lint budget.
+extension ANSIParser {
+    /// Tracks OSC sequence boundaries so a BEL is preserved only when it terminates
+    /// a sequence. `ESC ]` opens one; the ST terminator (`ESC \`) or its closing
+    /// backslash closes one. Returns the updated open state.
+    fileprivate static func trackOSCState(
+        _ ch: Character, in text: String, at index: String.Index, isOSCOpen: Bool
+    ) -> Bool {
+        guard ch == "\u{001B}" || ch == "\\" else { return isOSCOpen }
+        guard ch == "\\" else {
+            let afterESC = text.index(after: index)
+            return afterESC < text.endIndex && text[afterESC] == "]"
+        }
+        return false
+    }
+
+    /// BEL also terminates OSC sequences — OSC 8 hyperlinks use it as their
+    /// terminator (e.g. `ESC ] 8 ; ; https://example.com BEL`). Dropping it while a
+    /// sequence is still open leaves the payload unterminated, so the parser
+    /// swallows the rest of the line and the link is lost. Outside an OSC sequence
+    /// BEL is just a beep and is discarded.
+    fileprivate static func handleBell(buffer: inout String, isOSCOpen: inout Bool) {
+        guard isOSCOpen else { return }
+        buffer.append("\u{0007}")
+        isOSCOpen = false
+    }
+
+    /// Handles a `\r` and returns the index the outer loop should resume at.
+    /// zsh redraws its prompt with a bare CR, so a standalone CR overwrites the
+    /// current line rather than moving to the next one.
+    fileprivate static func handleCarriageReturn(
+        in text: String, at index: String.Index,
+        buffer: inout String, isCRPending: inout Bool, onlyPromptLike: Bool
+    ) -> String.Index {
+        let next = text.index(after: index)
+        if next < text.endIndex, text[next] == "\n" { // CRLF -> LF
+            buffer.append("\n")
+            isCRPending = false
+            return text.index(after: next)
+        }
+        clearCurrentLine(&buffer, onlyPromptLike: onlyPromptLike)
+        // A CR at the very end of a chunk defers the line clear to the next chunk.
+        isCRPending = next == text.endIndex
+        return next
     }
 }

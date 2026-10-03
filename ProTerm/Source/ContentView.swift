@@ -17,19 +17,43 @@ struct ContentView: View {
     
     // Quick commands panel visibility
     @State private var showQuickCommands = false
+    @State private var quickCommandsPanelWidth: CGFloat = 280
     
     // Command palette visibility
     @State private var showCommandPalette = false
+    
+    // Close confirmation dialog state
+    @State private var showCloseConfirmation = false
+    @State private var closeConfirmationIndex: Int = 0
+    @State private var closeConfirmationMessage: String = ""
+    @State private var closeConfirmationAction: CloseConfirmationAction = .closeSession
+    
+    enum CloseConfirmationAction {
+        case closeSession
+        case closeOtherSessions
+        case closeSessionsToRight
+    }
 
     private var focusController: CommandInputFocusController { CommandInputFocusController.shared }
 
     var body: some View {
+        HStack(spacing: 0) {
+            if showQuickCommands {
+                QuickCommandsPanel(
+                    isVisible: $showQuickCommands,
+                    panelWidth: $quickCommandsPanelWidth
+                )
+                .frame(width: quickCommandsPanelWidth, alignment: .leading)
+                .padding(.leading, 12)
+            }
+            terminalWorkspace
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var terminalWorkspace: some View {
         ZStack {
-            HStack(spacing: 0) {
-                // Quick commands panel (left sidebar)
-                QuickCommandsPanel(isVisible: $showQuickCommands)
-                
-                VStack(spacing: 0) {
+            VStack(spacing: 0) {
                 // MARK: – Button bar (receives the binding to keep tabs in sync)
                 ButtonBarView(selectedTab: $selectedTab, showQuickCommands: $showQuickCommands)
                     .padding(.horizontal, 8)
@@ -152,21 +176,35 @@ struct ContentView: View {
                 StatusBarView(selectedTab: $selectedTab)
                     .frame(height: 28)
                     .background(themeManager.current.background.opacity(0.1))
-                }
             }
-            
-            // Toast notifications overlay
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
             ToastContainer()
-            
-            // Command palette overlay
+
+            // Close confirmation dialog (Terminal.app style)
+            if showCloseConfirmation {
+                ZStack {
+                    Color.black.opacity(0.4)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            showCloseConfirmation = false
+                        }
+                    
+                    showCloseConfirmationDialog()
+                        .transition(AnyTransition.scale.combined(with: .opacity))
+                }
+                .zIndex(1000)
+            }
+
             if showCommandPalette {
                 CommandPaletteView(isVisible: $showCommandPalette, selectedTab: $selectedTab)
-                    .zIndex(1000)
+                    .zIndex(1001)
             }
         }
         .onAppear {
             terminalManager.setShellManager(shellManager)
             setupKeyboardShortcuts()
+            setupCloseNotificationObservers()
             
             // CRITICAL: Activate app and ensure window is key on startup
             // This is essential for focus to work when running outside Xcode
@@ -261,7 +299,7 @@ struct ContentView: View {
                 if let fileURL = url,
                    let content = try? String(contentsOf: fileURL, encoding: .utf8) {
                     DispatchQueue.main.async {
-                        let session = TerminalSession(shellManager: shellManager)
+                        let session = TerminalSession(shellManager: shellManager, startLoginShell: false)
                         session.output = content
                         terminalManager.sessions.append(session)
                     }
@@ -308,10 +346,17 @@ struct ContentView: View {
         }
         
         keyboardShortcutsManager.onCloseTab = {
-            // Close current tab
+            // Close current tab - now with Terminal.app-style warning if process running
             if terminalManager.sessions.count > 1 {
-                terminalManager.closeSession(at: selectedTab)
-                selectedTab = min(selectedTab, terminalManager.sessions.count - 1)
+                if let warning = terminalManager.warningMessageForSession(at: selectedTab) {
+                    closeConfirmationIndex = selectedTab
+                    closeConfirmationMessage = warning
+                    closeConfirmationAction = .closeSession
+                    showCloseConfirmation = true
+                } else {
+                    terminalManager.forceCloseSession(at: selectedTab)
+                    selectedTab = min(selectedTab, terminalManager.sessions.count - 1)
+                }
             }
         }
         
@@ -359,6 +404,98 @@ struct ContentView: View {
         keyboardShortcutsManager.onCommandPalette = {
             // Open command palette
             showCommandPalette = true
+        }
+    }
+    
+    // MARK: - Close Notification Observers (separate to avoid duplicates)
+    private func setupCloseNotificationObservers() {
+        NotificationCenter.default.addObserver(forName: .proTermCloseSessionWithWarning, object: nil, queue: .main) { notification in
+            // Extract values from notification before entering MainActor context
+            let index = notification.object as? Int
+            let warning = notification.userInfo?["warning"] as? String ?? "Process is running. Close anyway?"
+            Task { @MainActor in
+                if let index = index {
+                    self.closeConfirmationIndex = index
+                    self.closeConfirmationMessage = warning
+                    self.closeConfirmationAction = .closeSession
+                    self.showCloseConfirmation = true
+                }
+            }
+        }
+        
+        NotificationCenter.default.addObserver(forName: .proTermCloseMultipleSessionsWithWarning, object: nil, queue: .main) { notification in
+            // Extract values from notification before entering MainActor context
+            let index = notification.object as? Int
+            let affected = notification.userInfo?["affectedIndices"] as? [Int] ?? []
+            let direction = notification.userInfo?["direction"] as? String
+            Task { @MainActor in
+                if let index = index {
+                    self.closeConfirmationIndex = index
+                    self.closeConfirmationMessage = "\(affected.count) session(s) have running processes. Close anyway?"
+                    self.closeConfirmationAction = (direction == "right") ? .closeSessionsToRight : .closeOtherSessions
+                    self.showCloseConfirmation = true
+                }
+            }
+        }
+    }
+    
+    private func performCloseAction() {
+        switch closeConfirmationAction {
+        case .closeSession:
+            terminalManager.forceCloseSession(at: closeConfirmationIndex)
+            selectedTab = min(selectedTab, terminalManager.sessions.count - 1)
+        case .closeOtherSessions:
+            terminalManager.closeOtherSessions(except: closeConfirmationIndex, requireConfirmation: false)
+            selectedTab = 0
+        case .closeSessionsToRight:
+            terminalManager.closeSessionsToRight(of: closeConfirmationIndex, requireConfirmation: false)
+        }
+    }
+    
+    // MARK: - Close Confirmation Dialog
+    private func showCloseConfirmationDialog() -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 40))
+                .foregroundColor(.yellow)
+            
+            Text("Close Session?")
+                .font(.headline)
+            
+            Text(closeConfirmationMessage)
+                .font(.body)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            
+            HStack(spacing: 16) {
+                Button("Cancel") {
+                    showCloseConfirmation = false
+                }
+                .keyboardShortcut(.cancelAction)
+                
+                Button("Close") {
+                    performCloseAction()
+                    showCloseConfirmation = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(24)
+        .frame(width: 320)
+        .background(Color(NSColor.windowBackgroundColor))
+        .cornerRadius(12)
+        .shadow(radius: 20)
+        .alert("Close Session?", isPresented: $showCloseConfirmation) {
+            Button("Cancel", role: .cancel) {
+                showCloseConfirmation = false
+            }
+            Button("Close", role: .destructive) {
+                performCloseAction()
+            }
+        } message: {
+            Text(closeConfirmationMessage)
         }
     }
 }

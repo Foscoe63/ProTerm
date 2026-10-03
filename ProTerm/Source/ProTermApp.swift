@@ -16,14 +16,16 @@ struct ProTermApp: App {
     @StateObject private var aiManager: AIManager
     
     init() {
+        let shellManager = ShellManager()
         let terminalManager = TerminalManager()
+        terminalManager.setShellManager(shellManager)
         let fontManager = FontManager()
         let themeManager = ThemeManager()
         themeManager.attachFontManager(fontManager)
         
         _terminalManager = StateObject(wrappedValue: terminalManager)
         _themeManager = StateObject(wrappedValue: themeManager)
-        _shellManager = StateObject(wrappedValue: ShellManager())
+        _shellManager = StateObject(wrappedValue: shellManager)
         _keyboardShortcutsManager = StateObject(wrappedValue: KeyboardShortcutsManager())
         _fontManager = StateObject(wrappedValue: fontManager)
         _advancedTextSelection = StateObject(wrappedValue: AdvancedTextSelection())

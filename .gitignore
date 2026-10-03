@@ -118,3 +118,20 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
+
+# Agent / tooling sandboxes (not part of the app)
+.air/
+.agents/
+.aionrs/
+.claude/
+.codegraph/
+.cowork/
+.idea/
+.ijfw/
+.junie/
+.omo/
+.opencode/
+.swiftopenwork/
+i-have-adhd/
+skills-lock.json
+SWIFTOPENWORK.md

@@ -16,6 +16,12 @@ int proterm_forkpty_exec(const char *command_path, char *const argv[],
                          char *const envv[], int *out_master_fd,
                          unsigned short rows, unsigned short cols);
 
+// Direct exec version that changes to cwd in the child before exec.
+int proterm_forkpty_exec_in_dir(const char *command_path, char *const argv[],
+                                char *const envv[], const char *cwd,
+                                int *out_master_fd, unsigned short rows,
+                                unsigned short cols);
+
 // Terminal resize helper
 int proterm_set_winsize(int fd, unsigned short rows, unsigned short cols);
 

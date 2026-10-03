@@ -48,6 +48,14 @@ int proterm_forkpty_spawn(const char *shell_path, const char *command,
 int proterm_forkpty_exec(const char *command_path, char *const argv[],
                          char *const envv[], int *out_master_fd,
                          unsigned short rows, unsigned short cols) {
+  return proterm_forkpty_exec_in_dir(command_path, argv, envv, NULL,
+                                     out_master_fd, rows, cols);
+}
+
+int proterm_forkpty_exec_in_dir(const char *command_path, char *const argv[],
+                                char *const envv[], const char *cwd,
+                                int *out_master_fd, unsigned short rows,
+                                unsigned short cols) {
   if (!command_path || !argv || !out_master_fd) {
     return -1;
   }
@@ -65,6 +73,9 @@ int proterm_forkpty_exec(const char *command_path, char *const argv[],
   }
 
   if (pid == 0) {
+    if (cwd && chdir(cwd) != 0) {
+      _exit(126);
+    }
     // Child: exec the command directly
     execve(command_path, argv, envv);
     _exit(127);

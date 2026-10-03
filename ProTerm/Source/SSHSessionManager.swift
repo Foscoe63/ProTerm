@@ -47,7 +47,7 @@ final class SSHSessionManager: @unchecked Sendable {
     guard !host.isEmpty else { return .failure(.invalidHost(host)) }
 
     // Create the session that will own the PTY.
-    let session = TerminalSession(shellManager: shellManager)
+    let session = TerminalSession(shellManager: shellManager, startLoginShell: false)
 
     // -----------------------------------------------------------------
     // Build the ssh command using a dedicated builder (unifies logic).
@@ -79,17 +79,14 @@ final class SSHSessionManager: @unchecked Sendable {
     // TERM: Terminal type. Using 'xterm' instead of 'xterm-256color'
     // for better compatibility with older Cisco/ASA devices.
     let askpassPath = Bundle.main.path(forResource: "ssh-askpass", ofType: "sh") ?? ""
-    var sshEnv = [
+    let sshEnv = [
       "TERM": "xterm",
       "SSH_ASKPASS": askpassPath,
       "DISPLAY": ":0",
       "SSH_ASKPASS_REQUIRE": "force",
     ]
 
-    // If a password is provided, pass it in the environment so the askpass script can use it
-    if let pwd = password, !pwd.isEmpty {
-      sshEnv["PROTERM_SSH_PASSWORD"] = pwd
-    }
+    // Password is handled securely via SSH_ASKPASS system dialog (not in environment)
 
 
     let handler = PTYWrapper(command: execPath, args: args, env: sshEnv)

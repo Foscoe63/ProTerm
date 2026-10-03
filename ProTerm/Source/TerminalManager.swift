@@ -1,6 +1,7 @@
 import SwiftUI          // ObservableObject, @Published (re‑exports Combine)
 import Combine           // needed for @Published’s initializer & ObservableObjectPublisher
 import AppKit           // (optional – kept for consistency)
+import Darwin           // for kill() and SIGKILL
 
 /// Manages a collection of terminal sessions.
 @MainActor
@@ -23,17 +24,11 @@ final class TerminalManager: ObservableObject {
     
     /// Reference to shell manager for creating new sessions
     private var shellManager: ShellManager?
+    private var didBootstrapSessions = false
     private var titleObserver: NSObjectProtocol?
 
-    /// Restore persisted session IDs (or create a default session).
+    /// Sessions are created once `setShellManager` runs (ContentView.onAppear / ProTermApp).
     init() {
-        let savedIDs = SessionPersistence.shared.load()
-        if savedIDs.isEmpty {
-            addSession()               // create a default first session
-        } else {
-            for _ in savedIDs { addSession() }
-        }
-        
         titleObserver = NotificationCenter.default.addObserver(
             forName: .terminalTitleDidChange,
             object: nil,
@@ -59,9 +54,21 @@ final class TerminalManager: ObservableObject {
         }
     }
     
-    /// Set the shell manager reference
+    /// Set the shell manager reference and create initial sessions (once).
     func setShellManager(_ shellManager: ShellManager) {
         self.shellManager = shellManager
+        bootstrapSessionsIfNeeded()
+    }
+
+    private func bootstrapSessionsIfNeeded() {
+        guard !didBootstrapSessions, shellManager != nil else { return }
+        didBootstrapSessions = true
+        let savedIDs = SessionPersistence.shared.load()
+        if savedIDs.isEmpty {
+            addSession()
+        } else {
+            for _ in savedIDs { addSession() }
+        }
     }
 
     // MARK: – Session handling
@@ -112,12 +119,28 @@ final class TerminalManager: ObservableObject {
         return tabMetadata[sessionId] ?? TabMetadata(name: "Session", color: .default)
     }
 
-    func closeSession(at index: Int) {
+    /// Check if a session has a running process that should warn before closing
+    func sessionHasRunningProcess(_ session: TerminalSession) -> Bool {
+        return session.isProcessRunning && session.hasActivePTY
+    }
+    
+    /// Get warning message for a session with running processes
+    func warningMessageForSession(at index: Int) -> String? {
+        guard sessions.indices.contains(index) else { return nil }
+        let session = sessions[index]
+        
+        if session.isSSHSession && session.isProcessRunning {
+            return "This SSH session is still connected. Closing will disconnect."
+        } else if session.isProcessRunning && session.hasActivePTY {
+            return "This session has a running process. Closing will terminate it."
+        }
+        return nil
+    }
+    
+    /// Force close a session without confirmation (used after user confirms)
+    func forceCloseSession(at index: Int) {
         guard sessions.indices.contains(index) else { return }
-        NotificationHelper.shared.notify(
-            title: "Session Closed",
-            body: "Closed session \(index + 1)"
-        )
+        
         let session = sessions[index]
         let sessionId = session.id
         
@@ -129,8 +152,34 @@ final class TerminalManager: ObservableObject {
             )
         }
         
+        // Send SIGKILL to any running process
+        if session.childPID > 0 {
+            _ = kill(session.childPID, SIGKILL)
+        }
+        
         sessions.remove(at: index)
         tabMetadata.removeValue(forKey: sessionId)
+    }
+    
+    /// Close session with optional confirmation if process is running
+    /// Returns true if closed immediately, false if user needs to confirm
+    @discardableResult
+    func closeSession(at index: Int, requireConfirmation: Bool = true) -> Bool {
+        guard sessions.indices.contains(index) else { return false }
+        
+        // Check if we need to warn about running process
+        if requireConfirmation, let warning = warningMessageForSession(at: index) {
+            // Post notification for UI to show confirmation dialog
+            NotificationCenter.default.post(
+                name: .proTermCloseSessionWithWarning,
+                object: index,
+                userInfo: ["warning": warning]
+            )
+            return false
+        }
+        
+        forceCloseSession(at: index)
+        return true
     }
     
     func duplicateSession(at index: Int) {
@@ -138,8 +187,7 @@ final class TerminalManager: ObservableObject {
         let sourceSession = sessions[index]
         guard let shellManager = shellManager else { return }
         
-        let newSession = TerminalSession(shellManager: shellManager)
-        newSession.cwd = sourceSession.cwd
+        let newSession = TerminalSession(shellManager: shellManager, initialCWD: sourceSession.cwd)
         newSession.output = sourceSession.output
         newSession.commandHistory = sourceSession.commandHistory
         
@@ -152,28 +200,81 @@ final class TerminalManager: ObservableObject {
         sessions.append(newSession)
     }
     
-    func closeOtherSessions(except index: Int) {
+    /// Close all sessions except the one at index, with optional confirmation
+    func closeOtherSessions(except index: Int, requireConfirmation: Bool = true) {
         guard sessions.indices.contains(index) else { return }
         
-        // Remove all sessions except the one at index
-        let sessionsToRemove = sessions.enumerated().filter { $0.offset != index }
-        for (_, session) in sessionsToRemove {
-            tabMetadata.removeValue(forKey: session.id)
+        // Check if any sessions to close have running processes
+        if requireConfirmation {
+            var sessionsWithWarnings: [Int] = []
+            for (i, session) in sessions.enumerated() {
+                if i != index && sessionHasRunningProcess(session) {
+                    sessionsWithWarnings.append(i)
+                }
+            }
+            
+            if !sessionsWithWarnings.isEmpty {
+                NotificationCenter.default.post(
+                    name: .proTermCloseMultipleSessionsWithWarning,
+                    object: index,
+                    userInfo: ["affectedIndices": sessionsWithWarnings]
+                )
+                return
+            }
         }
         
-        sessions = [sessions[index]]
+        // Proceed with closing
+        let keepSession = sessions[index]
+        let updatedSessions: [TerminalSession] = [keepSession]
+        var updatedMetadata: [UUID: TabMetadata] = [:]
+        updatedMetadata[keepSession.id] = tabMetadata[keepSession.id] ?? TabMetadata(name: "Session 1", color: .default)
+        
+        for session in sessions where session.id != keepSession.id {
+            if session.childPID > 0 {
+                _ = kill(session.childPID, SIGKILL)
+            }
+        }
+        
+        sessions = updatedSessions
+        tabMetadata = updatedMetadata
     }
     
-    func closeSessionsToRight(of index: Int) {
+    /// Close all sessions after index, with optional confirmation
+    func closeSessionsToRight(of index: Int, requireConfirmation: Bool = true) {
         guard sessions.indices.contains(index) else { return }
         
-        // Remove all sessions after index
-        let sessionsToRemove = sessions.suffix(from: index + 1)
-        for session in sessionsToRemove {
-            tabMetadata.removeValue(forKey: session.id)
+        // Check if any sessions to close have running processes
+        if requireConfirmation {
+            var sessionsWithWarnings: [Int] = []
+            for i in (index + 1)..<sessions.count {
+                if sessionHasRunningProcess(sessions[i]) {
+                    sessionsWithWarnings.append(i)
+                }
+            }
+            
+            if !sessionsWithWarnings.isEmpty {
+                NotificationCenter.default.post(
+                    name: .proTermCloseMultipleSessionsWithWarning,
+                    object: index,
+                    userInfo: ["affectedIndices": sessionsWithWarnings, "direction": "right"]
+                )
+                return
+            }
+        }
+        
+        // Kill any running processes in sessions to close
+        for i in (index + 1)..<sessions.count {
+            if sessions[i].childPID > 0 {
+                _ = kill(sessions[i].childPID, SIGKILL)
+            }
         }
         
         sessions = Array(sessions.prefix(index + 1))
+        // Clean up metadata for removed sessions
+        let removedIds = Set(sessions.dropFirst(index + 1).map { $0.id })
+        for id in removedIds {
+            tabMetadata.removeValue(forKey: id)
+        }
     }
     
     func moveSession(from sourceIndex: Int, to destinationIndex: Int) {

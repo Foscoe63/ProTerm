@@ -59,6 +59,15 @@ struct Theme: Codable, Equatable {
         try container.encode(CodableColor(foreground), forKey: .foreground)
         try container.encode(CodableColor(cursor),    forKey: .cursor)
     }
+
+    // `Color` is not `Equatable`, so synthesized equality compared instances by
+    // identity and a theme that had been through JSON never equalled its original.
+    // Compare the stored sRGB components instead.
+    static func == (lhs: Theme, rhs: Theme) -> Bool {
+        CodableColor(lhs.background) == CodableColor(rhs.background) &&
+        CodableColor(lhs.foreground) == CodableColor(rhs.foreground) &&
+        CodableColor(lhs.cursor) == CodableColor(rhs.cursor)
+    }
 }
 
 /* ---------- Manager that the UI observes ---------- */

@@ -22,6 +22,8 @@ final class CommandInputFocusController {
 
     private var fieldTable: [UUID: FieldEntry] = [:]
     private var activeSessionID: UUID?
+    private var lastFocusRequestAt: [UUID: Date] = [:]
+    private let focusDebounceInterval: TimeInterval = 0.12
     private let verificationDelays: [UInt64] = [
         50_000_000,    // 0.05s
         200_000_000,   // 0.20s
@@ -111,6 +113,16 @@ final class CommandInputFocusController {
         } else if !window.isKeyWindow {
             log("requestFocus skipped (window not key) session=\(targetID.uuidString) reason=\(reason.rawValue)")
             return
+        }
+
+        if reason == .notification || reason == .manual {
+            let now = Date()
+            if let last = lastFocusRequestAt[targetID],
+               now.timeIntervalSince(last) < focusDebounceInterval {
+                log("requestFocus skipped (debounced) session=\(targetID.uuidString) reason=\(reason.rawValue)")
+                return
+            }
+            lastFocusRequestAt[targetID] = now
         }
 
         log("requestFocus start session=\(targetID.uuidString) reason=\(reason.rawValue)")
