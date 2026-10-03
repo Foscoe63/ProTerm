@@ -14,7 +14,15 @@ private let TIOCSWINSZ: UInt = 0x8008_7467
 final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecked Sendable {
   let id = UUID()
 
-  @Published var output: String = ""
+  @Published var output: String = "" {
+    didSet { if output.isEmpty && !commandMarkers.isEmpty { commandMarkers.removeAll() } }
+  }
+  /// Where the user submitted commands (for collapsible sections). Not persisted.
+  var commandMarkers: [CommandMarker] = []
+  /// Sections the user has folded; the view re-renders when this changes.
+  @Published var collapsedSections: Set<UUID> = []
+  @Published private(set) var isRecording: Bool = false
+  private var recorder: SessionRecorder?
   @Published var isProcessRunning: Bool = false
   @Published var isLoginShellActive: Bool = false
   /// Latest PS1 from the login-shell PTY (not stored in scrollback).
@@ -913,6 +921,8 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
       return
     }
     commandHistory.append(trimmed)
+    // A separate `payload` means the typed text is not what goes on the wire (e.g. a password).
+    if payload == nil { markCommandSubmitted(trimmed) }
     recordPTYSubmission(command: sanitized, payload: payload)
     let wire = (payload ?? sanitized) + "\n"
     ProTermPTYDebug.log(
@@ -948,6 +958,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
     guard !trimmed.isEmpty else { return }
     // Record history of commands submitted
     commandHistory.append(trimmed)
+    markCommandSubmitted(trimmed)
 
     prepareForCommandSubmission()
 
@@ -1748,6 +1759,7 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
           + "chunkLen=\(chunk.count)")
       return
     }
+    if let recorder, !recorder.record(chunk) { stopRecording() }
     // Pre-handle minimal TUI control sequences (clear screen, alt-screen toggle)
     var processed = processTUIControlSequences(chunk)
     if isLoginShellActive && !isSSHSession {
@@ -1989,7 +2001,55 @@ final class TerminalSession: NSObject, ObservableObject, Identifiable, @unchecke
 
     // Keep the last portion of the output to maintain recent history
     let startIndex = text.index(text.endIndex, offsetBy: -maxOutputLength)
+    shiftCommandMarkers(by: text.utf16.distance(from: text.startIndex, to: startIndex))
     return String(text[startIndex...])
+  }
+
+  /// Output was trimmed from the front: move markers with it and drop those that scrolled off.
+  private func shiftCommandMarkers(by removed: Int) {
+    guard !commandMarkers.isEmpty, removed > 0 else { return }
+    commandMarkers = commandMarkers.compactMap { marker in
+      guard marker.offset >= removed else { return nil }
+      var moved = marker
+      moved.offset -= removed
+      return moved
+    }
+    collapsedSections.formIntersection(Set(commandMarkers.map(\.id)))
+  }
+
+  // MARK: - Command markers
+
+  @MainActor
+  func markCommandSubmitted(_ command: String) {
+    let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    commandMarkers.append(CommandMarker(offset: output.utf16.count, command: trimmed))
+    if commandMarkers.count > 2000 { commandMarkers.removeFirst(commandMarkers.count - 2000) }
+  }
+
+  func collapseAllSections() { collapsedSections = Set(commandMarkers.map(\.id)) }
+  func expandAllSections() { collapsedSections = [] }
+
+  // MARK: - Recording
+
+  @MainActor
+  @discardableResult
+  func startRecording(title: String) -> URL? {
+    guard recorder == nil else { return recorder?.url }
+    guard let recorder = SessionRecorder(columns: columns, rows: rows, title: title) else { return nil }
+    self.recorder = recorder
+    isRecording = true
+    return recorder.url
+  }
+
+  @MainActor
+  @discardableResult
+  func stopRecording() -> URL? {
+    guard let recorder else { return nil }
+    recorder.stop()
+    self.recorder = nil
+    isRecording = false
+    return recorder.url
   }
 
   @MainActor

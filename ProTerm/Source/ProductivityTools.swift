@@ -114,6 +114,10 @@ class ProductivityTools: NSObject, ObservableObject {
     
     // MARK: - Output Filtering
     @Published var outputFilters: [OutputFilter] = []
+    /// Clickable headers that fold each command's output.
+    @Published var collapsibleSections: Bool = UserDefaults.standard.bool(forKey: "ProTermCollapsibleSections") {
+        didSet { UserDefaults.standard.set(collapsibleSections, forKey: "ProTermCollapsibleSections") }
+    }
     /// Built-in coloring of error / warning / success keywords in output.
     @Published var colorCodeOutput: Bool = UserDefaults.standard.bool(forKey: "ProTermColorCodeOutput") {
         didSet { UserDefaults.standard.set(colorCodeOutput, forKey: "ProTermColorCodeOutput") }

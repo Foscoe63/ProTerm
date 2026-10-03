@@ -370,6 +370,11 @@ struct TerminalView: View {
         scrollViewContent(geo: geo, proxy: proxy, availableWidth: availableWidth, availableHeight: availableHeight)
         processIndicatorOverlay
       }
+      .environment(\.openURL, OpenURLAction { url in
+        guard let id = CommandSections.id(from: url) else { return .systemAction }
+        session.collapsedSections.formSymmetricDifference([id])
+        return .handled
+      })
       .onAppear {
         // Restore the offset of a tab the user had scrolled up in when they left it.
         if let offset = terminalManager.savedScrollOffsets[session.id] {
@@ -499,6 +504,14 @@ struct TerminalView: View {
       updateCachedAttributedOutput()
     }
     .onChange(of: productivityTools.outputFilters.map { "\($0.id)\($0.pattern)\($0.action)\($0.isEnabled)\($0.color)\($0.replacement ?? "")\($0.isRegex)" }) { _, _ in
+      lastProcessedOutput = "\u{0}invalidated"
+      updateCachedAttributedOutput()
+    }
+    .onChange(of: session.collapsedSections) { _, _ in
+      lastProcessedOutput = "\u{0}invalidated"
+      updateCachedAttributedOutput()
+    }
+    .onChange(of: productivityTools.collapsibleSections) { _, _ in
       lastProcessedOutput = "\u{0}invalidated"
       updateCachedAttributedOutput()
     }
@@ -786,6 +799,7 @@ struct TerminalView: View {
             let activePTY = session.hasActivePTY
             if activePTY {
               let payload = preparePTYInputPayload(from: commandInput)
+              if !showPasswordInput { session.markCommandSubmitted(cmd) }
               session.sendInput(payload + "\n")
               commandInput = ""
               hasPendingBracketedPaste = false
@@ -1019,6 +1033,7 @@ struct TerminalView: View {
                               if sanitizedInput != commandInput {
                                   commandInput = sanitizedInput
                               }
+                              if !showPasswordInput { session.markCommandSubmitted(cmd) }
                               session.sendInput(sanitizedInput + "\n")
                               commandInput = ""
                               // Restore focus after a delay to ensure view has updated
@@ -1569,7 +1584,10 @@ struct TerminalView: View {
       return
     }
     
-    var attributed = ANSIParser.parse(sessionOutput, baseFont: fontManager.font)
+    let displayOutput = productivityTools.collapsibleSections
+      ? CommandSections.fold(sessionOutput, markers: session.commandMarkers, collapsed: session.collapsedSections)
+      : sessionOutput
+    var attributed = ANSIParser.parse(displayOutput, baseFont: fontManager.font)
     attributed = OutputStyler.apply(
       rules: OutputStyler.compile(productivityTools.outputFilters),
       colorCode: productivityTools.colorCodeOutput,

@@ -2385,6 +2385,11 @@ struct FilterSettings: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Output Filters & Color Coding").font(.title2).fontWeight(.bold)
 
+                Toggle("Collapsible command output (click ▾ before a command to fold its output)",
+                       isOn: $productivityTools.collapsibleSections)
+                Text("Folding hides output on screen only. Search skips folded text; exports always include everything.")
+                    .font(.caption).foregroundColor(.secondary)
+
                 Toggle("Color-code errors, warnings and successes", isOn: $productivityTools.colorCodeOutput)
                 Text("Colors keywords like error / warning / passed. Colors set by the program itself are left alone.")
                     .font(.caption).foregroundColor(.secondary)
